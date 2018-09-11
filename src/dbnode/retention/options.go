@@ -45,7 +45,7 @@ const (
 	defaultDataExpiryAfterNotAccessedPeriod = 5 * time.Minute
 
 	// defaultNonRealtimeWritesEnabled is the default setting on whether to accept writes to any time
-	defaultNonRealtimeWritesEnabled = false
+	defaultNonRealtimeWritesEnabled = true
 
 	// defaultNonRealtimeFlushAfterNoMetricPeriod is the period of no metrics after which a non-realtime metric
 	// block should be flushed

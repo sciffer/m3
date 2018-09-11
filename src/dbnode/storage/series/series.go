@@ -473,9 +473,6 @@ func (s *dbSeries) Bootstrap(bootstrappedBlocks block.DatabaseSeriesBlocks) (Boo
 		return result, nil
 	}
 
-	// Request the in-memory buffer to drain and reset so that the start times
-	// of the blocks in the buckets are set to the latest valid times
-	s.buffer.DrainAndReset()
 	min, _, err := s.buffer.MinMax()
 	if err != nil {
 		return result, err

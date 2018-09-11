@@ -46,7 +46,7 @@ const (
 	defaultRepairEnabled = false
 
 	// Disable allowing writing to arbitrary times by default
-	defaultNonRealtimeWritesEnabled = false
+	defaultNonRealtimeWritesEnabled = true
 )
 
 var (
