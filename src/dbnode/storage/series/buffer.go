@@ -50,14 +50,6 @@ const (
 	defaultBufferBucketPoolSize = 16
 )
 
-type computeBucketIdxOp int
-type bucketType int
-
-const (
-	computeBucketIdx computeBucketIdxOp = iota
-	computeAndResetBucketIdx
-)
-
 type databaseBuffer interface {
 	Write(
 		ctx context.Context,
@@ -288,8 +280,11 @@ func (b *dbBuffer) Stats() bufferStats {
 }
 
 func (b *dbBuffer) Tick() bufferTickResult {
-	// Avoid capturing any variables with callback
-	mergedOutOfOrder := b.computedForEachBucketAsc(computeAndResetBucketIdx, bucketTick)
+	mergedOutOfOrder := 0
+	for key := range b.buckets {
+		mergedOutOfOrder += bucketTick(b.nowFn(), b, key.ToTime())
+	}
+
 	return bufferTickResult{
 		mergedOutOfOrderBlocks: mergedOutOfOrder,
 	}
@@ -382,46 +377,32 @@ func (b *dbBuffer) forEachBucketAsc(
 	}
 }
 
-// computedForEachBucketAsc performs a fn on the buckets in time ascending order
-// and returns the sum of the number returned by each fn
-func (b *dbBuffer) computedForEachBucketAsc(
-	op computeBucketIdxOp,
-	fn func(now time.Time, b *dbBuffer, bucketStart time.Time) int,
-) int {
-	result := 0
-	for key := range b.buckets {
-		result += fn(b.nowFn(), b, key.ToTime())
-	}
-
-	return result
-}
-
 func (b *dbBuffer) Snapshot(ctx context.Context, blockStart time.Time) (xio.SegmentReader, error) {
 	var (
 		res xio.SegmentReader
 		err error
 	)
 
-	b.forEachBucketAsc(func(bucket *dbBufferBucket) {
+	for _, bucket := range b.buckets {
 		if err != nil {
 			// Something already went wrong and we want to return the error to the caller
 			// as soon as possible instead of continuing to do work.
-			return
+			continue
 		}
 
 		if !bucket.canRead() {
-			return
+			continue
 		}
 
 		if !blockStart.Equal(bucket.start) {
-			return
+			continue
 		}
 
 		// We need to merge all the bootstrapped blocks / encoders into a single stream for
 		// the sake of being able to persist it to disk as a single encoded stream.
 		_, err = bucket.merge()
 		if err != nil {
-			return
+			continue
 		}
 
 		// This operation is safe because all of the underlying resources will respect the
@@ -434,12 +415,12 @@ func (b *dbBuffer) Snapshot(ctx context.Context, blockStart time.Time) (xio.Segm
 			// Should never happen as the call to merge above should result in only a single
 			// stream being present.
 			err = errMoreThanOneStreamAfterMerge
-			return
+			continue
 		}
 
 		// Direct indexing is safe because canRead guarantees us at least one stream
 		res = streams[0]
-	})
+	}
 
 	return res, err
 }
@@ -447,15 +428,15 @@ func (b *dbBuffer) Snapshot(ctx context.Context, blockStart time.Time) (xio.Segm
 func (b *dbBuffer) ReadEncoded(ctx context.Context, start, end time.Time) [][]xio.BlockReader {
 	// TODO(r): pool these results arrays
 	var res [][]xio.BlockReader
-	b.forEachBucketAsc(func(bucket *dbBufferBucket) {
+	for _, bucket := range b.buckets {
 		if !bucket.canRead() {
-			return
+			continue
 		}
 		if !start.Before(bucket.start.Add(b.blockSize)) {
-			return
+			continue
 		}
 		if !bucket.start.Before(end) {
-			return
+			continue
 		}
 
 		res = append(res, bucket.streams(ctx))
@@ -467,7 +448,7 @@ func (b *dbBuffer) ReadEncoded(ctx context.Context, start, end time.Time) [][]xi
 		// the storage nodes. This distinction is important as this
 		// data is important for use with understanding access patterns, etc.
 		bucket.setLastRead(b.nowFn())
-	})
+	}
 
 	return res
 }
@@ -475,9 +456,9 @@ func (b *dbBuffer) ReadEncoded(ctx context.Context, start, end time.Time) [][]xi
 func (b *dbBuffer) FetchBlocks(ctx context.Context, starts []time.Time) []block.FetchBlockResult {
 	var res []block.FetchBlockResult
 
-	b.forEachBucketAsc(func(bucket *dbBufferBucket) {
+	for _, bucket := range b.buckets {
 		if !bucket.canRead() {
-			return
+			continue
 		}
 		found := false
 		// starts have only a few items, linear search should be okay time-wise to
@@ -489,12 +470,12 @@ func (b *dbBuffer) FetchBlocks(ctx context.Context, starts []time.Time) []block.
 			}
 		}
 		if !found {
-			return
+			continue
 		}
 
 		streams := bucket.streams(ctx)
 		res = append(res, block.NewFetchBlockResult(bucket.start, streams, nil))
-	})
+	}
 
 	return res
 }
@@ -506,17 +487,17 @@ func (b *dbBuffer) FetchBlocksMetadata(
 ) block.FetchBlockMetadataResults {
 	blockSize := b.opts.RetentionOptions().BlockSize()
 	res := b.opts.FetchBlockMetadataResultsPool().Get()
-	b.forEachBucketAsc(func(bucket *dbBufferBucket) {
+	for _, bucket := range b.buckets {
 		if !bucket.canRead() {
-			return
+			continue
 		}
 		if !start.Before(bucket.start.Add(blockSize)) || !bucket.start.Before(end) {
-			return
+			continue
 		}
 		size := int64(bucket.streamsLen())
 		// If we have no data in this bucket, return early without appending it to the result.
 		if size == 0 {
-			return
+			continue
 		}
 		var resultSize int64
 		if opts.IncludeSizes {
@@ -533,7 +514,7 @@ func (b *dbBuffer) FetchBlocksMetadata(
 			Size:     resultSize,
 			LastRead: resultLastRead,
 		})
-	})
+	}
 
 	return res
 }
