@@ -115,16 +115,15 @@ type bufferTickResult struct {
 }
 
 type dbBuffer struct {
-	opts              Options
-	nowFn             clock.NowFn
-	drainFn           databaseBufferDrainFn
-	pastMostBucketIdx int
-	bucketLRUCache    [lruCacheSize]*dbBufferBucket
-	buckets           map[xtime.UnixNano]*dbBufferBucket
-	bucketPool        *dbBufferBucketPool
-	blockSize         time.Duration
-	bufferPast        time.Duration
-	bufferFuture      time.Duration
+	opts           Options
+	nowFn          clock.NowFn
+	drainFn        databaseBufferDrainFn
+	bucketLRUCache [lruCacheSize]*dbBufferBucket
+	buckets        map[xtime.UnixNano]*dbBufferBucket
+	bucketPool     *dbBufferBucketPool
+	blockSize      time.Duration
+	bufferPast     time.Duration
+	bufferFuture   time.Duration
 }
 
 type databaseBufferDrainFn func(b block.DatabaseBlock)
@@ -200,6 +199,10 @@ func (b *dbBuffer) bucketForTime(t time.Time) *dbBufferBucket {
 
 	// First check LRU cache
 	for _, bucket := range b.bucketLRUCache {
+		if bucket == nil {
+			continue
+		}
+
 		if bucket.start.Equal(blockStart) {
 			return bucket
 		}
@@ -224,11 +227,16 @@ func (b *dbBuffer) bucketForTime(t time.Time) *dbBufferBucket {
 // lruBucketIdx returns the index of the least recently used bucket in the LRU cache
 func (b *dbBuffer) lruBucketIdxInCache() int {
 	idx := -1
-	lastReadTime := time.Unix(1<<63-1, 0)
+	var lastReadTime time.Time
 
 	for i, bucket := range b.bucketLRUCache {
+		if bucket == nil {
+			// An empty slot in the cache is older than any existing bucket
+			return i
+		}
+
 		curLastRead := bucket.lastRead()
-		if curLastRead.Before(lastReadTime) {
+		if idx == -1 || curLastRead.Before(lastReadTime) {
 			lastReadTime = curLastRead
 			idx = i
 		}
