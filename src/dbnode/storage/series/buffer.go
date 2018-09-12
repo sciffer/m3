@@ -140,9 +140,8 @@ func (b *dbBuffer) Reset(opts Options) {
 	b.bufferFuture = ropts.BufferFuture()
 
 	if ropts.NonRealtimeWritesEnabled() {
-		// TODO
-		// bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
-		// b.bucketPool = newDBBufferBucketPool(bucketPoolOpts)
+		bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
+		b.bucketPool = newDBBufferBucketPool(bucketPoolOpts)
 	}
 }
 
@@ -207,8 +206,7 @@ func (b *dbBuffer) bucketForTime(t time.Time) *dbBufferBucket {
 	}
 
 	// Doesn't exist, so create it
-	// TODO: pool this
-	bucket := &dbBufferBucket{}
+	bucket := b.bucketPool.Get()
 	bucket.resetTo(blockStart, b.opts)
 	// Update LRU cache
 	b.bucketLRUCache[b.lruBucketIdxInCache()] = bucket
@@ -241,17 +239,8 @@ func (b *dbBuffer) bucketKeyForTime(t time.Time) xtime.UnixNano {
 	return xtime.ToUnixNano(t.Truncate(b.blockSize))
 }
 
-// TODO: pool
-// func (b *dbBuffer) initializeNonRealtimeBucket(key xtime.UnixNano) *dbBufferBucket {
-// 	newNonRealtimeBucket := b.bucketPool.Get()
-// 	b.bucketsNonRealtime[key] = newNonRealtimeBucket
-// 	newNonRealtimeBucket.resetTo(key.ToTime(), false)
-// 	return newNonRealtimeBucket
-// }
-
 func (b *dbBuffer) removeBucket(key xtime.UnixNano) {
-	// b.bucketPool.Put(b.bucketsNonRealtime[idx])
-	// TODO: pool this
+	b.bucketPool.Put(b.buckets[key])
 	delete(b.buckets, key)
 }
 
