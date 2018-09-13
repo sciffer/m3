@@ -356,16 +356,6 @@ func (b *dbBuffer) Bootstrap(bl block.DatabaseBlock) error {
 	return nil
 }
 
-// forEachBucketAsc iterates over the buckets in time ascending order
-// to read bucket data
-func (b *dbBuffer) forEachBucketAsc(
-	fn func(*dbBufferBucket),
-) {
-	for _, bucket := range b.buckets {
-		fn(bucket)
-	}
-}
-
 func (b *dbBuffer) Snapshot(ctx context.Context, blockStart time.Time) (xio.SegmentReader, error) {
 	var (
 		res xio.SegmentReader
@@ -876,7 +866,7 @@ type discardMergedResult struct {
 	merges int
 }
 
-// TODO
+// TODO use this
 func (b *dbBufferBucket) discardMerged() (discardMergedResult, error) {
 	if b.hasJustSingleEncoder() {
 		// Already merged as a single encoder
