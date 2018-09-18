@@ -31,6 +31,7 @@ import (
 	"github.com/m3db/m3x/context"
 	xerrors "github.com/m3db/m3x/errors"
 	"github.com/m3db/m3x/ident"
+	xtime "github.com/m3db/m3x/time"
 )
 
 var (
@@ -81,7 +82,7 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 	ctx context.Context,
 	start, end time.Time,
 	seriesBlocks block.DatabaseSeriesBlocks,
-	seriesBuffer databaseBuffer,
+	buckets map[xtime.UnixNano]*dbBufferBucket,
 ) ([][]xio.BlockReader, error) {
 	// TODO(r): pool these results arrays
 	var results [][]xio.BlockReader
@@ -156,11 +157,32 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 		}
 	}
 
-	if seriesBuffer != nil {
-		bufferResults := seriesBuffer.ReadEncoded(ctx, start, end)
-		if len(bufferResults) > 0 {
-			results = append(results, bufferResults...)
+	// TODO(r): pool these results arrays
+	var bufferResults [][]xio.BlockReader
+	for _, bucket := range buckets {
+		if !bucket.canRead() {
+			continue
 		}
+		if !start.Before(bucket.start.Add(size)) {
+			continue
+		}
+		if !bucket.start.Before(end) {
+			continue
+		}
+
+		bufferResults = append(bufferResults, bucket.streams(ctx))
+
+		// NB(r): Store the last read time, should not set this when
+		// calling FetchBlocks as a read is differentiated from
+		// a FetchBlocks call. One is initiated by an external
+		// entity and the other is used for streaming blocks between
+		// the storage nodes. This distinction is important as this
+		// data is important for use with understanding access patterns, etc.
+		bucket.setLastRead(now)
+	}
+
+	if len(bufferResults) > 0 {
+		results = append(results, bufferResults...)
 	}
 
 	return results, nil
@@ -179,7 +201,7 @@ func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 	ctx context.Context,
 	starts []time.Time,
 	seriesBlocks block.DatabaseSeriesBlocks,
-	seriesBuffer databaseBuffer,
+	buckets map[xtime.UnixNano]*dbBufferBucket,
 ) ([]block.FetchBlockResult, error) {
 	var (
 		// TODO(r): pool these results arrays
@@ -234,9 +256,30 @@ func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 		}
 	}
 
-	if seriesBuffer != nil && !seriesBuffer.IsEmpty() {
-		bufferResults := seriesBuffer.FetchBlocks(ctx, starts)
-		res = append(res, bufferResults...)
+	// if seriesBuffer != nil && !seriesBuffer.IsEmpty() {
+	// 	bufferResults := seriesBuffer.FetchBlocks(ctx, starts)
+	// 	res = append(res, bufferResults...)
+	// }
+
+	for _, bucket := range buckets {
+		if !bucket.canRead() {
+			continue
+		}
+		found := false
+		// starts have only a few items, linear search should be okay time-wise to
+		// avoid allocating a map here.
+		for _, start := range starts {
+			if start.Equal(bucket.start) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+
+		streams := bucket.streams(ctx)
+		res = append(res, block.NewFetchBlockResult(bucket.start, streams, nil))
 	}
 
 	block.SortFetchBlockResultByTimeAscending(res)

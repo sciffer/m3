@@ -29,6 +29,7 @@ import (
 	"github.com/m3db/m3/src/dbnode/digest"
 	"github.com/m3db/m3/src/dbnode/persist"
 	"github.com/m3db/m3/src/dbnode/storage/block"
+	m3dberrors "github.com/m3db/m3/src/dbnode/storage/errors"
 	"github.com/m3db/m3/src/dbnode/ts"
 	"github.com/m3db/m3/src/dbnode/x/xio"
 	"github.com/m3db/m3x/context"
@@ -36,6 +37,7 @@ import (
 	"github.com/m3db/m3x/ident"
 	"github.com/m3db/m3x/instrument"
 	xlog "github.com/m3db/m3x/log"
+	"github.com/m3db/m3x/pool"
 	xtime "github.com/m3db/m3x/time"
 )
 
@@ -44,6 +46,11 @@ type bootstrapState int
 const (
 	bootstrapNotStarted bootstrapState = iota
 	bootstrapped
+
+	lruCacheSize = 2
+
+	// TODO: make sure this is a good pool size or make it customizable
+	defaultBufferBucketPoolSize = 16
 )
 
 var (
@@ -66,13 +73,18 @@ type dbSeries struct {
 	id   ident.ID
 	tags ident.Tags
 
-	buffer                      databaseBuffer
 	blocks                      block.DatabaseSeriesBlocks
 	bs                          bootstrapState
 	blockRetriever              QueryableBlockRetriever
 	onRetrieveBlock             block.OnRetrieveBlock
 	blockOnEvictedFromWiredList block.OnEvictedFromWiredList
 	pool                        DatabaseSeriesPool
+
+	bucketLRUCache [lruCacheSize]*dbBufferBucket
+	buckets        map[xtime.UnixNano]*dbBufferBucket
+	bucketPool     *dbBufferBucketPool
+	bufferPast     time.Duration
+	bufferFuture   time.Duration
 }
 
 // NewDatabaseSeries creates a new database series
@@ -96,7 +108,6 @@ func newDatabaseSeries() *dbSeries {
 		blocks: block.NewDatabaseSeriesBlocks(0),
 		bs:     bootstrapNotStarted,
 	}
-	series.buffer = newDatabaseBuffer(series.bufferDrained)
 	return series
 }
 
@@ -121,22 +132,38 @@ func (s *dbSeries) Tags() ident.Tags {
 
 func (s *dbSeries) Tick() (TickResult, error) {
 	var r TickResult
-
 	s.Lock()
+	defer s.Unlock()
 
-	bufferResult := s.buffer.Tick()
-	r.MergedOutOfOrderBlocks = bufferResult.mergedOutOfOrderBlocks
+	now := s.now()
+	for key := range s.buckets {
+		start := key.ToTime()
+		bucket := s.bucketForTime(start)
+
+		// Try to merge any out of order encoders to amortize the cost of a drain
+		mergeResult, err := bucket.merge()
+		if err != nil {
+			log := s.opts.InstrumentOptions().Logger()
+			log.Errorf("buffer merge encode error: %v", err)
+		}
+
+		if bucket.isStale(now) {
+			s.removeBucket(s.bucketKeyForTime(start))
+		}
+
+		if mergeResult.merges > 0 {
+			r.MergedOutOfOrderBlocks++
+		}
+	}
 
 	update, err := s.updateBlocksWithLock()
 	if err != nil {
-		s.Unlock()
 		return r, err
 	}
+
 	r.TickStatus = update.TickStatus
 	r.MadeExpiredBlocks, r.MadeUnwiredBlocks =
 		update.madeExpiredBlocks, update.madeUnwiredBlocks
-
-	s.Unlock()
 
 	if update.ActiveBlocks == 0 {
 		return r, ErrSeriesAllDatapointsExpired
@@ -272,7 +299,7 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 		}
 	}
 
-	bufferStats := s.buffer.Stats()
+	bufferStats := s.Stats()
 	result.ActiveBlocks += bufferStats.wiredBlocks
 	result.WiredBlocks += bufferStats.wiredBlocks
 	result.OpenBlocks += bufferStats.openBlocks
@@ -283,7 +310,7 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 func (s *dbSeries) IsEmpty() bool {
 	s.RLock()
 	blocksLen := s.blocks.Len()
-	bufferEmpty := s.buffer.IsEmpty()
+	bufferEmpty := s.IsEmptyBuckets()
 	s.RUnlock()
 	if blocksLen == 0 && bufferEmpty {
 		return true
@@ -293,7 +320,7 @@ func (s *dbSeries) IsEmpty() bool {
 
 func (s *dbSeries) NumActiveBlocks() int {
 	s.RLock()
-	value := s.blocks.Len() + s.buffer.Stats().wiredBlocks
+	value := s.blocks.Len() + s.Stats().wiredBlocks
 	s.RUnlock()
 	return value
 }
@@ -313,9 +340,15 @@ func (s *dbSeries) Write(
 	annotation []byte,
 ) error {
 	s.Lock()
-	err := s.buffer.Write(ctx, timestamp, value, unit, annotation)
-	s.Unlock()
-	return err
+	defer s.Unlock()
+
+	if !s.opts.RetentionOptions().NonRealtimeWritesEnabled() && !s.isRealtime(timestamp) {
+		return m3dberrors.ErrNonRealtimeWriteTimeNotEnabled
+	}
+
+	bucket := s.bucketForTime(timestamp)
+
+	return bucket.write(s.now(), timestamp, value, unit, annotation)
 }
 
 func (s *dbSeries) ReadEncoded(
@@ -324,9 +357,38 @@ func (s *dbSeries) ReadEncoded(
 ) ([][]xio.BlockReader, error) {
 	s.RLock()
 	reader := NewReaderUsingRetriever(s.id, s.blockRetriever, s.onRetrieveBlock, s, s.opts)
-	r, err := reader.readersWithBlocksMapAndBuffer(ctx, start, end, s.blocks, s.buffer)
+	r, err := reader.readersWithBlocksMapAndBuffer(ctx, start, end, s.blocks, s.buckets)
 	s.RUnlock()
 	return r, err
+}
+
+func (s *dbSeries) ReadEncodedBuckets(ctx context.Context, start, end time.Time) [][]xio.BlockReader {
+	blockSize := s.opts.RetentionOptions().BlockSize()
+	// TODO(r): pool these results arrays
+	var res [][]xio.BlockReader
+	for _, bucket := range s.buckets {
+		if !bucket.canRead() {
+			continue
+		}
+		if !start.Before(bucket.start.Add(blockSize)) {
+			continue
+		}
+		if !bucket.start.Before(end) {
+			continue
+		}
+
+		res = append(res, bucket.streams(ctx))
+
+		// NB(r): Store the last read time, should not set this when
+		// calling FetchBlocks as a read is differentiated from
+		// a FetchBlocks call. One is initiated by an external
+		// entity and the other is used for streaming blocks between
+		// the storage nodes. This distinction is important as this
+		// data is important for use with understanding access patterns, etc.
+		bucket.setLastRead(s.now())
+	}
+
+	return res
 }
 
 func (s *dbSeries) FetchBlocks(
@@ -334,12 +396,16 @@ func (s *dbSeries) FetchBlocks(
 	starts []time.Time,
 ) ([]block.FetchBlockResult, error) {
 	s.RLock()
+	var buckets map[xtime.UnixNano]*dbBufferBucket
+	if s.IsEmptyBuckets() {
+		buckets = s.buckets
+	}
 	r, err := Reader{
 		opts:       s.opts,
 		id:         s.id,
 		retriever:  s.blockRetriever,
 		onRetrieve: s.onRetrieveBlock,
-	}.fetchBlocksWithBlocksMapAndBuffer(ctx, starts, s.blocks, s.buffer)
+	}.fetchBlocksWithBlocksMapAndBuffer(ctx, starts, s.blocks, buckets)
 	s.RUnlock()
 	return r, err
 }
@@ -396,8 +462,37 @@ func (s *dbSeries) FetchBlocksMetadata(
 	}
 
 	// Iterate over the encoders in the database buffer
-	if !s.buffer.IsEmpty() {
-		bufferResults := s.buffer.FetchBlocksMetadata(ctx, start, end, opts)
+	if !s.IsEmptyBuckets() {
+		bufferResults := s.opts.FetchBlockMetadataResultsPool().Get()
+		for _, bucket := range s.buckets {
+			if !bucket.canRead() {
+				continue
+			}
+			if !start.Before(bucket.start.Add(blockSize)) || !bucket.start.Before(end) {
+				continue
+			}
+			size := int64(bucket.streamsLen())
+			// If we have no data in this bucket, return early without appending it to the result.
+			if size == 0 {
+				continue
+			}
+			var resultSize int64
+			if opts.IncludeSizes {
+				resultSize = size
+			}
+			var resultLastRead time.Time
+			if opts.IncludeLastRead {
+				resultLastRead = bucket.lastRead()
+			}
+			// NB(r): Ignore if opts.IncludeChecksum because we avoid
+			// calculating checksum since block is open and is being mutated
+			bufferResults.Add(block.FetchBlockMetadataResult{
+				Start:    bucket.start,
+				Size:     resultSize,
+				LastRead: resultLastRead,
+			})
+		}
+
 		for _, result := range bufferResults.Results() {
 			res.Add(result)
 		}
@@ -473,7 +568,7 @@ func (s *dbSeries) Bootstrap(bootstrappedBlocks block.DatabaseSeriesBlocks) (Boo
 		return result, nil
 	}
 
-	min, _, err := s.buffer.MinMax()
+	min, _, err := s.MinMax()
 	if err != nil {
 		return result, err
 	}
@@ -486,9 +581,18 @@ func (s *dbSeries) Bootstrap(bootstrappedBlocks block.DatabaseSeriesBlocks) (Boo
 		// If there is a writable, undrained series buffer bucket then store the block
 		// there and it will be merged / drained as part of the usual lifecycle.
 		if !t.Before(min) {
-			if err := s.buffer.Bootstrap(block); err != nil {
-				multiErr = multiErr.Add(s.newBootstrapBlockError(block, err))
+			blockStart := block.StartTime()
+			key := s.bucketKeyForTime(blockStart)
+
+			if bucket, ok := s.buckets[key]; ok && !bucket.drained {
+				bucket.bootstrap(block)
+			} else {
+				multiErr = multiErr.Add(s.newBootstrapBlockError(
+					block,
+					fmt.Errorf("failed to bootstrap block at %s", blockStart.String()),
+				))
 			}
+
 			result.NumBlocksMovedToBuffer++
 			continue
 		}
@@ -695,7 +799,44 @@ func (s *dbSeries) Snapshot(
 	} else {
 		// If the data hasn't been rotated into an immutable block yet,
 		// then it may be in the series buffer (because its still mutable).
-		stream, err = s.buffer.Snapshot(ctx, blockStart)
+		for _, bucket := range s.buckets {
+			if err != nil {
+				// Something already went wrong and we want to return the error to the caller
+				// as soon as possible instead of continuing to do work.
+				continue
+			}
+
+			if !bucket.canRead() {
+				continue
+			}
+
+			if !blockStart.Equal(bucket.start) {
+				continue
+			}
+
+			// We need to merge all the bootstrapped blocks / encoders into a single stream for
+			// the sake of being able to persist it to disk as a single encoded stream.
+			_, err = bucket.merge()
+			if err != nil {
+				continue
+			}
+
+			// This operation is safe because all of the underlying resources will respect the
+			// lifecycle of the context in one way or another. The "bootstrapped blocks" that
+			// we stream from will mark their internal context as dependent on that of the passed
+			// context, and the Encoder's that we stream from actually perform a data copy and
+			// don't share a reference.
+			streams := bucket.streams(ctx)
+			if len(streams) != 1 {
+				// Should never happen as the call to merge above should result in only a single
+				// stream being present.
+				err = errMoreThanOneStreamAfterMerge
+				continue
+			}
+
+			// Direct indexing is safe because canRead guarantees us at least one stream
+			stream = streams[0]
+		}
 	}
 
 	if err != nil {
@@ -738,7 +879,10 @@ func (s *dbSeries) Close() {
 
 	// Reset (not close) underlying resources because the series will go
 	// back into the pool and be re-used.
-	s.buffer.Reset(s.opts)
+	if s.opts.RetentionOptions().NonRealtimeWritesEnabled() {
+		bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
+		s.bucketPool = newDBBufferBucketPool(bucketPoolOpts)
+	}
 	s.blocks.Reset()
 
 	if s.pool != nil {
@@ -775,11 +919,133 @@ func (s *dbSeries) Reset(
 	s.id = id
 	s.tags = tags
 
+	if s.opts.RetentionOptions().NonRealtimeWritesEnabled() {
+		bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
+		s.bucketPool = newDBBufferBucketPool(bucketPoolOpts)
+	}
 	s.blocks.Reset()
-	s.buffer.Reset(opts)
 	s.opts = opts
 	s.bs = bootstrapNotStarted
 	s.blockRetriever = blockRetriever
 	s.onRetrieveBlock = onRetrieveBlock
 	s.blockOnEvictedFromWiredList = onEvictedFromWiredList
+}
+
+func (s *dbSeries) bucketForTime(t time.Time) *dbBufferBucket {
+	blockSize := s.opts.RetentionOptions().BlockSize()
+	blockStart := t.Truncate(blockSize)
+
+	// First check LRU cache
+	for _, bucket := range s.bucketLRUCache {
+		if bucket == nil {
+			continue
+		}
+
+		if bucket.start.Equal(blockStart) {
+			return bucket
+		}
+	}
+
+	// Then check the map
+	key := xtime.ToUnixNano(blockStart)
+	if bucket, ok := s.buckets[key]; ok {
+		return bucket
+	}
+
+	// Doesn't exist, so create it
+	bucket := s.bucketPool.Get()
+	bucket.resetTo(blockStart, s.opts)
+	// Update LRU cache
+	s.bucketLRUCache[s.lruBucketIdxInCache()] = bucket
+	s.buckets[key] = bucket
+	return bucket
+}
+
+// lruBucketIdx returns the index of the least recently used bucket in the LRU cache
+func (s *dbSeries) lruBucketIdxInCache() int {
+	idx := -1
+	var lastReadTime time.Time
+
+	for i, bucket := range s.bucketLRUCache {
+		if bucket == nil {
+			// An empty slot in the cache is older than any existing bucket
+			return i
+		}
+
+		curLastRead := bucket.lastRead()
+		if idx == -1 || curLastRead.Before(lastReadTime) {
+			lastReadTime = curLastRead
+			idx = i
+		}
+	}
+
+	return idx
+}
+
+func (s *dbSeries) isRealtime(timestamp time.Time) bool {
+	now := s.now()
+	futureLimit := now.Add(1 * s.bufferFuture)
+	pastLimit := now.Add(-1 * s.bufferPast)
+	return pastLimit.Before(timestamp) && futureLimit.After(timestamp)
+}
+
+type bufferStats struct {
+	openBlocks  int
+	wiredBlocks int
+}
+
+type drainAndResetResult struct {
+	mergedOutOfOrderBlocks int
+}
+
+func (s *dbSeries) bucketKeyForTime(t time.Time) xtime.UnixNano {
+	blockSize := s.opts.RetentionOptions().BlockSize()
+	return xtime.ToUnixNano(t.Truncate(blockSize))
+}
+
+func (s *dbSeries) removeBucket(key xtime.UnixNano) {
+	s.bucketPool.Put(s.buckets[key])
+	delete(s.buckets, key)
+}
+
+func (s *dbSeries) IsEmptyBuckets() bool {
+	for _, bucket := range s.buckets {
+		if bucket.canRead() {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *dbSeries) Stats() bufferStats {
+	var stats bufferStats
+
+	for _, bucket := range s.buckets {
+		if !bucket.canRead() {
+			continue
+		}
+		stats.openBlocks++
+		stats.wiredBlocks++
+	}
+
+	return stats
+}
+
+func (s *dbSeries) MinMax() (time.Time, time.Time, error) {
+	var min, max time.Time
+	for i := range s.buckets {
+		if (min.IsZero() || s.buckets[i].start.Before(min)) && !s.buckets[i].drained {
+			min = s.buckets[i].start
+		}
+		if max.IsZero() || s.buckets[i].start.After(max) && !s.buckets[i].drained {
+			max = s.buckets[i].start
+		}
+	}
+
+	if min.IsZero() || max.IsZero() {
+		// Should never happen
+		return time.Time{}, time.Time{}, errNoAvailableBuckets
+	}
+	return min, max, nil
 }
