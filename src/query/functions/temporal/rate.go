@@ -67,7 +67,7 @@ func newRateNode(op baseOp, controller *transform.Controller, opts transform.Opt
 	}
 
 	if op.operatorType == RateType || op.operatorType == IncreaseType || op.operatorType == DeltaType {
-		rateFunc = normalRate
+		rateFunc = stdRate
 	}
 
 	return &rateNode{
@@ -94,14 +94,14 @@ func (r *rateNode) Process(values []float64) float64 {
 	return r.rateFunc(values, r.isRate, r.isCounter, r.timeSpec)
 }
 
-func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
+func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
 	var (
-		rangeStart          = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
-		rangeEnd            = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
+		rangeStart = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
+		rangeEnd   = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
+
 		counterCorrection   float64
 		firstVal, lastValue float64
 		firstIdx, lastIdx   int
-		numPts              int
 		foundFirst          bool
 	)
 
@@ -127,10 +127,9 @@ func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.Tim
 		}
 		lastValue = val
 		lastIdx = i
-		numPts++
 	}
 
-	if numPts == 0 {
+	if firstIdx == lastIdx {
 		return math.NaN()
 	}
 
@@ -147,7 +146,7 @@ func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.Tim
 	fmt.Println(firstTS, lastTS, durationToStart, durationToStart)
 
 	sampledInterval := lastTS - firstTS
-	averageDurationBetweenSamples := sampledInterval / float64(numPts)
+	averageDurationBetweenSamples := sampledInterval / float64(lastIdx)
 
 	fmt.Println(sampledInterval, averageDurationBetweenSamples)
 
