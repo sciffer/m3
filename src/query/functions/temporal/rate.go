@@ -96,15 +96,13 @@ func (r *rateNode) Process(values []float64) float64 {
 
 func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
 	var (
-		// rangeStart = enh.ts - durationMilliseconds(ms.Range+ms.Offset)
-		rangeStart = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
-		rangeEnd   = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
-		// rangeEnd   = enh.ts - durationMilliseconds(ms.Offset)
-		counterCorrection         float64
-		lastValue                 float64
-		firstVal                  float64
-		firstIdx, lastIdx, numPts int
-		foundFirst                bool
+		rangeStart          = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
+		rangeEnd            = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
+		counterCorrection   float64
+		firstVal, lastValue float64
+		firstIdx, lastIdx   int
+		numPts              int
+		foundFirst          bool
 	)
 
 	fmt.Println("vals: ", values, rangeStart, rangeEnd)
@@ -121,6 +119,7 @@ func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.Tim
 		if !foundFirst {
 			firstVal = val
 			firstIdx = i
+			foundFirst = true
 		}
 
 		if isCounter && val < lastValue {
@@ -147,7 +146,6 @@ func normalRate(values []float64, isRate, isCounter bool, timeSpec transform.Tim
 
 	fmt.Println(firstTS, lastTS, durationToStart, durationToStart)
 
-	// sampledInterval := float64(samples.Points[len(samples.Points)-1].T-samples.Points[0].T) / 1000
 	sampledInterval := lastTS - firstTS
 	averageDurationBetweenSamples := sampledInterval / float64(numPts)
 
