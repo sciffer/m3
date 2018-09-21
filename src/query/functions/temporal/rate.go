@@ -137,7 +137,6 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	fmt.Println("res value: ", resultValue, lastValue, lastIdx, firstVal, firstIdx)
 
 	// Duration between first/last samples and boundary of range.
-	// use already implemented func to find these
 	firstTS := float64(timeSpec.Start.Unix()) + (timeSpec.Step.Seconds() * float64(firstIdx))
 	lastTS := float64(timeSpec.Start.Unix()) + (timeSpec.Step.Seconds() * float64(lastIdx))
 	durationToStart := float64(firstTS - rangeStart)
@@ -170,7 +169,7 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	// with an allowance for noise.
 	extrapolationThreshold := averageDurationBetweenSamples * 1.1
 	extrapolateToInterval := sampledInterval
-
+	fmt.Println("dur start; ", durationToStart, "dur end: ", durationToEnd, extrapolateToInterval, averageDurationBetweenSamples)
 	if durationToStart < extrapolationThreshold {
 		extrapolateToInterval += durationToStart
 	} else {
@@ -181,6 +180,7 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	} else {
 		extrapolateToInterval += averageDurationBetweenSamples / 2
 	}
+	fmt.Println(extrapolateToInterval)
 	resultValue = resultValue * (extrapolateToInterval / sampledInterval)
 	if isRate {
 		resultValue = resultValue / (float64(timeSpec.End.Unix()) - float64(timeSpec.Start.Unix()))
