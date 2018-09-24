@@ -43,14 +43,13 @@ var (
 type databaseBufferDrainFn func(b block.DatabaseBlock)
 
 type dbBufferBucket struct {
-	opts               Options
-	start              time.Time
-	encoders           []inOrderEncoder
-	bootstrapped       []block.DatabaseBlock
-	lastReadUnixNanos  int64
-	lastWriteUnixNanos int64
-	undrainedWrites    uint64
-	drained            bool
+	opts                  Options
+	start                 time.Time
+	encoders              []inOrderEncoder
+	bootstrapped          []block.DatabaseBlock
+	lastReadUnixNanos     int64
+	lastWriteUnixNanos    int64
+	lastSnapshotUnixNanos int64
 }
 
 type inOrderEncoder struct {
@@ -77,8 +76,7 @@ func (b *dbBufferBucket) resetTo(
 	b.bootstrapped = nil
 	atomic.StoreInt64(&b.lastReadUnixNanos, 0)
 	atomic.StoreInt64(&b.lastWriteUnixNanos, 0)
-	b.drained = false
-	b.resetNumWrites()
+	atomic.StoreInt64(&b.lastSnapshotUnixNanos, 0)
 }
 
 func (b *dbBufferBucket) finalize() {
@@ -98,18 +96,6 @@ func (b *dbBufferBucket) empty() bool {
 		}
 	}
 	return true
-}
-
-func (b *dbBufferBucket) canRead() bool {
-	return !b.drained && !b.empty()
-}
-
-func (b *dbBufferBucket) isStale(now time.Time) bool {
-	return now.Sub(b.lastWrite()) > b.opts.RetentionOptions().NonRealtimeFlushAfterNoMetricPeriod()
-}
-
-func (b *dbBufferBucket) isFull() bool {
-	return b.numWrites() >= b.opts.RetentionOptions().NonRealtimeMaxWritesBeforeFlush()
 }
 
 func (b *dbBufferBucket) bootstrap(
@@ -193,9 +179,6 @@ func (b *dbBufferBucket) write(
 	}
 
 	b.setLastWrite(now)
-	b.incNumWrites()
-	// Required for non-realtime buckets
-	b.drained = false
 	return nil
 }
 
@@ -253,6 +236,35 @@ func (b *dbBufferBucket) streamsLen() int {
 	return length
 }
 
+func (b *dbBufferBucket) mergeStreams(ctx context.Context) (xio.BlockReader, error) {
+	if b.empty() {
+		return xio.EmptyBlockReader, nil
+	}
+
+	// We need to merge all the bootstrapped blocks / encoders into a single stream for
+	// the sake of being able to persist it to disk as a single encoded stream.
+	_, err := b.merge()
+	if err != nil {
+		return xio.EmptyBlockReader, err
+	}
+
+	// This operation is safe because all of the underlying resources will respect the
+	// lifecycle of the context in one way or another. The "bootstrapped blocks" that
+	// we stream from will mark their internal context as dependent on that of the passed
+	// context, and the Encoder's that we stream from actually perform a data copy and
+	// don't share a reference.
+	streams := b.streams(ctx)
+	if len(streams) != 1 {
+		// Should never happen as the call to merge above should result in only a single
+		// stream being present.
+		return xio.EmptyBlockReader, errMoreThanOneStreamAfterMerge
+	}
+
+	// Direct indexing is safe because a bucket not being empty guarantees us at
+	// least one stream
+	return streams[0], nil
+}
+
 func (b *dbBufferBucket) setLastRead(value time.Time) {
 	atomic.StoreInt64(&b.lastReadUnixNanos, value.UnixNano())
 }
@@ -261,12 +273,8 @@ func (b *dbBufferBucket) setLastWrite(value time.Time) {
 	atomic.StoreInt64(&b.lastWriteUnixNanos, value.UnixNano())
 }
 
-func (b *dbBufferBucket) incNumWrites() {
-	atomic.AddUint64(&b.undrainedWrites, 1)
-}
-
-func (b *dbBufferBucket) resetNumWrites() {
-	atomic.StoreUint64(&b.undrainedWrites, uint64(0))
+func (b *dbBufferBucket) setLastSnapshot(value time.Time) {
+	atomic.StoreInt64(&b.lastSnapshotUnixNanos, value.UnixNano())
 }
 
 func (b *dbBufferBucket) lastRead() time.Time {
@@ -277,8 +285,8 @@ func (b *dbBufferBucket) lastWrite() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&b.lastWriteUnixNanos))
 }
 
-func (b *dbBufferBucket) numWrites() uint64 {
-	return atomic.LoadUint64(&b.undrainedWrites)
+func (b *dbBufferBucket) lastSnapshot() time.Time {
+	return time.Unix(0, atomic.LoadInt64(&b.lastSnapshotUnixNanos))
 }
 
 func (b *dbBufferBucket) resetEncoders() {
@@ -301,7 +309,7 @@ func (b *dbBufferBucket) resetBootstrapped() {
 }
 
 func (b *dbBufferBucket) needsMerge() bool {
-	return b.canRead() && !(b.hasJustSingleEncoder() || b.hasJustSingleBootstrappedBlock())
+	return !b.empty() && !(b.hasJustSingleEncoder() || b.hasJustSingleBootstrappedBlock())
 }
 
 func (b *dbBufferBucket) hasJustSingleEncoder() bool {
@@ -458,6 +466,10 @@ func (b *dbBufferBucket) discardMerged() (discardMergedResult, error) {
 	b.resetBootstrapped()
 
 	return discardMergedResult{newBlock, result.merges}, nil
+}
+
+func (b *dbBufferBucket) isDirty() bool {
+	return b.lastWrite().After(b.lastSnapshot())
 }
 
 type dbBufferBucketPool struct {

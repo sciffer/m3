@@ -73,15 +73,16 @@ func NewReaderUsingRetriever(
 // ReadEncoded reads encoded blocks using just a block retriever.
 func (r Reader) ReadEncoded(
 	ctx context.Context,
-	start, end time.Time,
+	start time.Time,
+	end time.Time,
 ) ([][]xio.BlockReader, error) {
-	return r.readersWithBlocksMapAndBuffer(ctx, start, end, nil, nil)
+	return r.readersWithBlocksMapAndBuffer(ctx, start, end, nil)
 }
 
 func (r Reader) readersWithBlocksMapAndBuffer(
 	ctx context.Context,
-	start, end time.Time,
-	seriesBlocks block.DatabaseSeriesBlocks,
+	start time.Time,
+	end time.Time,
 	buckets map[xtime.UnixNano]*dbBufferBucket,
 ) ([][]xio.BlockReader, error) {
 	// TODO(r): pool these results arrays
@@ -96,14 +97,14 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 		now          = nowFn()
 		cachePolicy  = r.opts.CachePolicy()
 		ropts        = r.opts.RetentionOptions()
-		size         = ropts.BlockSize()
-		alignedStart = start.Truncate(size)
-		alignedEnd   = end.Truncate(size)
+		blockSize    = ropts.BlockSize()
+		alignedStart = start.Truncate(blockSize)
+		alignedEnd   = end.Truncate(blockSize)
 	)
 
 	if alignedEnd.Equal(end) {
 		// Move back to make range [start, end)
-		alignedEnd = alignedEnd.Add(-1 * size)
+		alignedEnd = alignedEnd.Add(-1 * blockSize)
 	}
 
 	// Squeeze the lookup window by what's available to make range queries like [0, infinity) possible
@@ -111,33 +112,13 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 	if alignedStart.Before(earliest) {
 		alignedStart = earliest
 	}
-	latest := now.Add(ropts.BufferFuture()).Truncate(size)
+	latest := now.Add(ropts.BufferFuture()).Truncate(blockSize)
 	if alignedEnd.After(latest) {
 		alignedEnd = latest
 	}
 
 	first, last := alignedStart, alignedEnd
-	for blockAt := first; !blockAt.After(last); blockAt = blockAt.Add(size) {
-		if seriesBlocks != nil {
-			if block, ok := seriesBlocks.BlockAt(blockAt); ok {
-				// Block served from in-memory or in-memory metadata
-				// will defer to disk read
-				streamedBlock, err := block.Stream(ctx)
-				if err != nil {
-					return nil, err
-				}
-				if streamedBlock.IsNotEmpty() {
-					results = append(results, []xio.BlockReader{streamedBlock})
-					// NB(r): Mark this block as read now
-					block.SetLastReadTime(now)
-					if r.onRead != nil {
-						r.onRead.OnReadBlock(block)
-					}
-				}
-				continue
-			}
-		}
-
+	for blockAt := first; !blockAt.After(last); blockAt = blockAt.Add(blockSize) {
 		switch {
 		case cachePolicy == CacheAll:
 			// No-op, block metadata should have been in-memory
@@ -160,10 +141,10 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 	// TODO(r): pool these results arrays
 	var bufferResults [][]xio.BlockReader
 	for _, bucket := range buckets {
-		if !bucket.canRead() {
+		if bucket.empty() {
 			continue
 		}
-		if !start.Before(bucket.start.Add(size)) {
+		if !start.Before(bucket.start.Add(blockSize)) {
 			continue
 		}
 		if !bucket.start.Before(end) {
@@ -194,13 +175,12 @@ func (r Reader) FetchBlocks(
 	ctx context.Context,
 	starts []time.Time,
 ) ([]block.FetchBlockResult, error) {
-	return r.fetchBlocksWithBlocksMapAndBuffer(ctx, starts, nil, nil)
+	return r.fetchBlocksWithBlocksMapAndBuffer(ctx, starts, nil)
 }
 
 func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 	ctx context.Context,
 	starts []time.Time,
-	seriesBlocks block.DatabaseSeriesBlocks,
 	buckets map[xtime.UnixNano]*dbBufferBucket,
 ) ([]block.FetchBlockResult, error) {
 	var (
@@ -214,24 +194,14 @@ func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 		// peer.
 		onRetrieve block.OnRetrieveBlock
 	)
+
 	for _, start := range starts {
-		if seriesBlocks != nil {
-			if b, exists := seriesBlocks.BlockAt(start); exists {
-				streamedBlock, err := b.Stream(ctx)
-				if err != nil {
-					r := block.NewFetchBlockResult(start, nil,
-						fmt.Errorf("unable to retrieve block stream for series %s time %v: %v",
-							r.id.String(), start, err))
-					res = append(res, r)
-				}
-				if streamedBlock.IsNotEmpty() {
-					b := []xio.BlockReader{streamedBlock}
-					r := block.NewFetchBlockResult(start, b, nil)
-					res = append(res, r)
-				}
-				continue
-			}
+		if bucket, ok := buckets[xtime.ToUnixNano(start)]; ok {
+			streams := bucket.streams(ctx)
+			res = append(res, block.NewFetchBlockResult(bucket.start, streams, nil))
+			continue
 		}
+
 		switch {
 		case cachePolicy == CacheAll:
 			// No-op, block metadata should have been in-memory
@@ -254,32 +224,6 @@ func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 				}
 			}
 		}
-	}
-
-	// if seriesBuffer != nil && !seriesBuffer.IsEmpty() {
-	// 	bufferResults := seriesBuffer.FetchBlocks(ctx, starts)
-	// 	res = append(res, bufferResults...)
-	// }
-
-	for _, bucket := range buckets {
-		if !bucket.canRead() {
-			continue
-		}
-		found := false
-		// starts have only a few items, linear search should be okay time-wise to
-		// avoid allocating a map here.
-		for _, start := range starts {
-			if start.Equal(bucket.start) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			continue
-		}
-
-		streams := bucket.streams(ctx)
-		res = append(res, block.NewFetchBlockResult(bucket.start, streams, nil))
 	}
 
 	block.SortFetchBlockResultByTimeAscending(res)
