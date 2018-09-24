@@ -67,7 +67,7 @@ func newRateNode(op baseOp, controller *transform.Controller, opts transform.Opt
 	}
 
 	if op.operatorType == RateType || op.operatorType == IncreaseType || op.operatorType == DeltaType {
-		rateFunc = stdRate
+		rateFunc = standardRate
 	}
 
 	return &rateNode{
@@ -94,7 +94,7 @@ func (r *rateNode) Process(values []float64) float64 {
 	return r.rateFunc(values, r.isRate, r.isCounter, r.timeSpec)
 }
 
-func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
+func standardRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
 	var (
 		rangeStart = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
 		rangeEnd   = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
@@ -104,8 +104,6 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 		firstIdx, lastIdx   int
 		foundFirst          bool
 	)
-
-	fmt.Println("vals: ", values, rangeStart, rangeEnd)
 
 	if len(values) < 2 {
 		return math.NaN()
@@ -134,7 +132,6 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	}
 
 	resultValue := lastValue - firstVal + counterCorrection
-	fmt.Println("res value: ", resultValue, lastValue, lastIdx, firstVal, firstIdx)
 
 	// Duration between first/last samples and boundary of range.
 	firstTS := float64(timeSpec.Start.Unix()) + (timeSpec.Step.Seconds() * float64(firstIdx))
@@ -142,12 +139,8 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	durationToStart := float64(firstTS - rangeStart)
 	durationToEnd := float64(rangeEnd - lastTS)
 
-	fmt.Println(firstTS, lastTS, durationToStart, durationToStart)
-
 	sampledInterval := lastTS - firstTS
 	averageDurationBetweenSamples := sampledInterval / float64(lastIdx)
-
-	fmt.Println(sampledInterval, averageDurationBetweenSamples)
 
 	if isCounter && resultValue > 0 && firstVal >= 0 {
 		// Counters cannot be negative. If we have any slope at
@@ -169,24 +162,23 @@ func stdRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSp
 	// with an allowance for noise.
 	extrapolationThreshold := averageDurationBetweenSamples * 1.1
 	extrapolateToInterval := sampledInterval
-	fmt.Println("dur start; ", durationToStart, "dur end: ", durationToEnd, extrapolateToInterval, averageDurationBetweenSamples)
+
 	if durationToStart < extrapolationThreshold {
 		extrapolateToInterval += durationToStart
 	} else {
 		extrapolateToInterval += averageDurationBetweenSamples / 2
 	}
+
 	if durationToEnd < extrapolationThreshold {
 		extrapolateToInterval += durationToEnd
 	} else {
 		extrapolateToInterval += averageDurationBetweenSamples / 2
 	}
-	fmt.Println(extrapolateToInterval)
+
 	resultValue = resultValue * (extrapolateToInterval / sampledInterval)
 	if isRate {
 		resultValue = resultValue / (float64(timeSpec.End.Unix()) - float64(timeSpec.Start.Unix()))
 	}
-
-	fmt.Println("res val 2: ", resultValue)
 
 	return resultValue
 }
