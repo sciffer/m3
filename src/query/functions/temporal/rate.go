@@ -58,16 +58,24 @@ func NewRateOp(args []interface{}, optype string) (transform.Params, error) {
 }
 
 func newRateNode(op baseOp, controller *transform.Controller, opts transform.Options) Processor {
-	isRate := op.operatorType == IRateType || op.operatorType == RateType
-	isCounter := op.operatorType == RateType || op.operatorType == IncreaseType
+	var isRate, isCounter bool
+	switch op.operatorType {
+	case IRateType:
+		isRate = true
+	case RateType:
+		isRate = true
+		isCounter = true
+	case IncreaseType:
+		isCounter = true
+	}
 
-	var rateFunc rateFunc
+	var rateFn rateFn
 	if op.operatorType == IRateType || op.operatorType == IDeltaType {
-		rateFunc = irateFunc
+		rateFn = irateFunc
 	}
 
 	if op.operatorType == RateType || op.operatorType == IncreaseType || op.operatorType == DeltaType {
-		rateFunc = standardRate
+		rateFn = standardRateFunc
 	}
 
 	return &rateNode{
@@ -76,25 +84,25 @@ func newRateNode(op baseOp, controller *transform.Controller, opts transform.Opt
 		timeSpec:   opts.TimeSpec,
 		isRate:     isRate,
 		isCounter:  isCounter,
-		rateFunc:   rateFunc,
+		rateFn:     rateFn,
 	}
 }
 
-type rateFunc func([]float64, bool, bool, transform.TimeSpec) float64
+type rateFn func([]float64, bool, bool, transform.TimeSpec) float64
 
 type rateNode struct {
 	op                baseOp
 	controller        *transform.Controller
 	timeSpec          transform.TimeSpec
 	isRate, isCounter bool
-	rateFunc          rateFunc
+	rateFn            rateFn
 }
 
 func (r *rateNode) Process(values []float64) float64 {
-	return r.rateFunc(values, r.isRate, r.isCounter, r.timeSpec)
+	return r.rateFn(values, r.isRate, r.isCounter, r.timeSpec)
 }
 
-func standardRate(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
+func standardRateFunc(values []float64, isRate, isCounter bool, timeSpec transform.TimeSpec) float64 {
 	var (
 		rangeStart = float64(timeSpec.Start.Unix()) - timeSpec.Step.Seconds()
 		rangeEnd   = float64(timeSpec.End.Unix()) - timeSpec.Step.Seconds()
@@ -123,6 +131,7 @@ func standardRate(values []float64, isRate, isCounter bool, timeSpec transform.T
 		if isCounter && val < lastValue {
 			counterCorrection += lastValue
 		}
+
 		lastValue = val
 		lastIdx = i
 	}
@@ -136,8 +145,8 @@ func standardRate(values []float64, isRate, isCounter bool, timeSpec transform.T
 	// Duration between first/last samples and boundary of range.
 	firstTS := float64(timeSpec.Start.Unix()) + (timeSpec.Step.Seconds() * float64(firstIdx))
 	lastTS := float64(timeSpec.Start.Unix()) + (timeSpec.Step.Seconds() * float64(lastIdx))
-	durationToStart := float64(firstTS - rangeStart)
-	durationToEnd := float64(rangeEnd - lastTS)
+	durationToStart := firstTS - rangeStart
+	durationToEnd := rangeEnd - lastTS
 
 	sampledInterval := lastTS - firstTS
 	averageDurationBetweenSamples := sampledInterval / float64(lastIdx)
