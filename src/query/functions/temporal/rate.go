@@ -58,24 +58,22 @@ func NewRateOp(args []interface{}, optype string) (transform.Params, error) {
 }
 
 func newRateNode(op baseOp, controller *transform.Controller, opts transform.Options) Processor {
-	var isRate, isCounter bool
+	var (
+		isRate, isCounter bool
+		rateFn            = standardRateFunc
+	)
+
 	switch op.operatorType {
 	case IRateType:
 		isRate = true
+		rateFn = irateFunc
+	case IDeltaType:
+		rateFn = irateFunc
 	case RateType:
 		isRate = true
 		isCounter = true
 	case IncreaseType:
 		isCounter = true
-	}
-
-	var rateFn rateFn
-	if op.operatorType == IRateType || op.operatorType == IDeltaType {
-		rateFn = irateFunc
-	}
-
-	if op.operatorType == RateType || op.operatorType == IncreaseType || op.operatorType == DeltaType {
-		rateFn = standardRateFunc
 	}
 
 	return &rateNode{
