@@ -44,16 +44,8 @@ const (
 	// defaultDataExpiryAfterNotAccessedPeriod is the default data expiry after not accessed period
 	defaultDataExpiryAfterNotAccessedPeriod = 5 * time.Minute
 
-	// defaultNonRealtimeWritesEnabled is the default setting on whether to accept writes to any time
-	defaultNonRealtimeWritesEnabled = true
-
-	// defaultNonRealtimeFlushAfterNoMetricPeriod is the period of no metrics after which a non-realtime metric
-	// block should be flushed
-	defaultNonRealtimeFlushAfterNoMetricPeriod = 5 * time.Minute
-
-	// defaultNonRealtimeMaxWritesBeforeFlush is the max number writes in non-realtime blocks after which
-	// block should be flushed
-	defaultNonRealtimeMaxWritesBeforeFlush = 1<<16 - 1
+	// defaultOutOfOrderWritesEnabled is the default setting on whether to accept writes to any time
+	defaultOutOfOrderWritesEnabled = true
 )
 
 var (
@@ -66,29 +58,25 @@ var (
 )
 
 type options struct {
-	retentionPeriod                     time.Duration
-	blockSize                           time.Duration
-	bufferFuture                        time.Duration
-	bufferPast                          time.Duration
-	dataExpiryAfterNotAccessedPeriod    time.Duration
-	nonRealtimeFlushAfterNoMetricPeriod time.Duration
-	nonRealtimeMaxWritesBeforeFlush     uint64
-	dataExpiry                          bool
-	nonRealtimeWritesEnabled            bool
+	retentionPeriod                  time.Duration
+	blockSize                        time.Duration
+	bufferFuture                     time.Duration
+	bufferPast                       time.Duration
+	dataExpiryAfterNotAccessedPeriod time.Duration
+	dataExpiry                       bool
+	outOfOrderWritesEnabled          bool
 }
 
 // NewOptions creates new retention options
 func NewOptions() Options {
 	return &options{
-		retentionPeriod:                     defaultRetentionPeriod,
-		blockSize:                           defaultBlockSize,
-		bufferFuture:                        defaultBufferFuture,
-		bufferPast:                          defaultBufferPast,
-		dataExpiry:                          defaultDataExpiry,
-		dataExpiryAfterNotAccessedPeriod:    defaultDataExpiryAfterNotAccessedPeriod,
-		nonRealtimeFlushAfterNoMetricPeriod: defaultNonRealtimeFlushAfterNoMetricPeriod,
-		nonRealtimeMaxWritesBeforeFlush:     defaultNonRealtimeMaxWritesBeforeFlush,
-		nonRealtimeWritesEnabled:            defaultNonRealtimeWritesEnabled,
+		retentionPeriod:                  defaultRetentionPeriod,
+		blockSize:                        defaultBlockSize,
+		bufferFuture:                     defaultBufferFuture,
+		bufferPast:                       defaultBufferPast,
+		dataExpiry:                       defaultDataExpiry,
+		dataExpiryAfterNotAccessedPeriod: defaultDataExpiryAfterNotAccessedPeriod,
+		outOfOrderWritesEnabled:          defaultOutOfOrderWritesEnabled,
 	}
 }
 
@@ -121,9 +109,7 @@ func (o *options) Equal(value Options) bool {
 		o.bufferPast == value.BufferPast() &&
 		o.dataExpiry == value.BlockDataExpiry() &&
 		o.dataExpiryAfterNotAccessedPeriod == value.BlockDataExpiryAfterNotAccessedPeriod() &&
-		o.nonRealtimeWritesEnabled == value.NonRealtimeWritesEnabled() &&
-		o.nonRealtimeFlushAfterNoMetricPeriod == value.NonRealtimeFlushAfterNoMetricPeriod() &&
-		o.nonRealtimeMaxWritesBeforeFlush == value.NonRealtimeMaxWritesBeforeFlush()
+		o.outOfOrderWritesEnabled == value.OutOfOrderWritesEnabled()
 }
 
 func (o *options) SetRetentionPeriod(value time.Duration) Options {
@@ -186,32 +172,12 @@ func (o *options) BlockDataExpiryAfterNotAccessedPeriod() time.Duration {
 	return o.dataExpiryAfterNotAccessedPeriod
 }
 
-func (o *options) SetNonRealtimeWritesEnabled(value bool) Options {
+func (o *options) SetOutOfOrderWritesEnabled(value bool) Options {
 	opts := *o
-	opts.nonRealtimeWritesEnabled = value
+	opts.outOfOrderWritesEnabled = value
 	return &opts
 }
 
-func (o *options) NonRealtimeWritesEnabled() bool {
-	return o.nonRealtimeWritesEnabled
-}
-
-func (o *options) SetNonRealtimeFlushAfterNoMetricPeriod(value time.Duration) Options {
-	opts := *o
-	opts.nonRealtimeFlushAfterNoMetricPeriod = value
-	return &opts
-}
-
-func (o *options) NonRealtimeFlushAfterNoMetricPeriod() time.Duration {
-	return o.nonRealtimeFlushAfterNoMetricPeriod
-}
-
-func (o *options) SetNonRealtimeMaxWritesBeforeFlush(value uint64) Options {
-	opts := *o
-	opts.nonRealtimeMaxWritesBeforeFlush = value
-	return &opts
-}
-
-func (o *options) NonRealtimeMaxWritesBeforeFlush() uint64 {
-	return o.nonRealtimeMaxWritesBeforeFlush
+func (o *options) OutOfOrderWritesEnabled() bool {
+	return o.outOfOrderWritesEnabled
 }

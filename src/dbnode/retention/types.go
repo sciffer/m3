@@ -70,25 +70,9 @@ type Options interface {
 	// be expired after not being accessed for a given duration
 	BlockDataExpiryAfterNotAccessedPeriod() time.Duration
 
-	// SetNonRealtimeWritesEnabled sets whether writes to any time is enabled
-	SetNonRealtimeWritesEnabled(value bool) Options
+	// SetOutOfOrderWritesEnabled sets whether writes to any time is enabled
+	SetOutOfOrderWritesEnabled(value bool) Options
 
-	// NonRealtimeWritesEnabled returns whether writes to any time is enabled
-	NonRealtimeWritesEnabled() bool
-
-	// SetNonRealtimeFlushAfterNoMetricPeriod sets the period of no metrics after which
-	// non-realtime blocks should be flushed
-	SetNonRealtimeFlushAfterNoMetricPeriod(period time.Duration) Options
-
-	// NonRealtimeFlushAfterNoMetricPeriod returns the period of no metrics after which
-	// non-realtime blocks should be flushed
-	NonRealtimeFlushAfterNoMetricPeriod() time.Duration
-
-	// SetNonRealtimeMaxWritesBeforeFlush sets the max number of writes for a non-realtime block
-	// after which they should be flushed
-	SetNonRealtimeMaxWritesBeforeFlush(value uint64) Options
-
-	// NonRealtimeMaxWritesBeforeFlush returns the max number of writes for a non-realtime block
-	// after which they should be flushed
-	NonRealtimeMaxWritesBeforeFlush() uint64
+	// OutOfOrderWritesEnabled returns whether writes to any time is enabled
+	OutOfOrderWritesEnabled() bool
 }

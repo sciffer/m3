@@ -106,7 +106,7 @@ func ToMetadata(
 		SetSnapshotEnabled(opts.SnapshotEnabled).
 		SetRetentionOptions(ropts).
 		SetIndexOptions(iopts).
-		SetNonRealtimeWritesEnabled(opts.NonRealtimeWritesEnabled)
+		SetOutOfOrderWritesEnabled(opts.OutOfOrderWritesEnabled)
 
 	return NewMetadata(ident.StringID(id), mopts)
 }
@@ -161,6 +161,6 @@ func OptionsToProto(opts Options) *nsproto.NamespaceOptions {
 			Enabled:        iopts.Enabled(),
 			BlockSizeNanos: iopts.BlockSize().Nanoseconds(),
 		},
-		NonRealtimeWritesEnabled: opts.NonRealtimeWritesEnabled(),
+		OutOfOrderWritesEnabled: opts.OutOfOrderWritesEnabled(),
 	}
 }

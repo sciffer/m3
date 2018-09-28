@@ -275,28 +275,28 @@ func (mr *MockOptionsMockRecorder) IndexOptions() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IndexOptions", reflect.TypeOf((*MockOptions)(nil).IndexOptions))
 }
 
-// SetNonRealtimeWritesEnabled mocks base method
-func (m *MockOptions) SetNonRealtimeWritesEnabled(value bool) Options {
-	ret := m.ctrl.Call(m, "SetNonRealtimeWritesEnabled", value)
+// SetOutOfOrderWritesEnabled mocks base method
+func (m *MockOptions) SetOutOfOrderWritesEnabled(value bool) Options {
+	ret := m.ctrl.Call(m, "SetOutOfOrderWritesEnabled", value)
 	ret0, _ := ret[0].(Options)
 	return ret0
 }
 
-// SetNonRealtimeWritesEnabled indicates an expected call of SetNonRealtimeWritesEnabled
-func (mr *MockOptionsMockRecorder) SetNonRealtimeWritesEnabled(value interface{}) *gomock.Call {
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetNonRealtimeWritesEnabled", reflect.TypeOf((*MockOptions)(nil).SetNonRealtimeWritesEnabled), value)
+// SetOutOfOrderWritesEnabled indicates an expected call of SetOutOfOrderWritesEnabled
+func (mr *MockOptionsMockRecorder) SetOutOfOrderWritesEnabled(value interface{}) *gomock.Call {
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetOutOfOrderWritesEnabled", reflect.TypeOf((*MockOptions)(nil).SetOutOfOrderWritesEnabled), value)
 }
 
-// NonRealtimeWritesEnabled mocks base method
-func (m *MockOptions) NonRealtimeWritesEnabled() bool {
-	ret := m.ctrl.Call(m, "NonRealtimeWritesEnabled")
+// OutOfOrderWritesEnabled mocks base method
+func (m *MockOptions) OutOfOrderWritesEnabled() bool {
+	ret := m.ctrl.Call(m, "OutOfOrderWritesEnabled")
 	ret0, _ := ret[0].(bool)
 	return ret0
 }
 
-// NonRealtimeWritesEnabled indicates an expected call of NonRealtimeWritesEnabled
-func (mr *MockOptionsMockRecorder) NonRealtimeWritesEnabled() *gomock.Call {
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NonRealtimeWritesEnabled", reflect.TypeOf((*MockOptions)(nil).NonRealtimeWritesEnabled))
+// OutOfOrderWritesEnabled indicates an expected call of OutOfOrderWritesEnabled
+func (mr *MockOptionsMockRecorder) OutOfOrderWritesEnabled() *gomock.Call {
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OutOfOrderWritesEnabled", reflect.TypeOf((*MockOptions)(nil).OutOfOrderWritesEnabled))
 }
 
 // MockIndexOptions is a mock of IndexOptions interface

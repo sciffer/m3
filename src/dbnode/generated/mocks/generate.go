@@ -33,7 +33,6 @@
 //go:generate sh -c "mockgen -package=bootstrap -destination=$GOPATH/src/$PACKAGE/src/dbnode/storage/bootstrap/bootstrap_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/storage/bootstrap/types.go"
 //go:generate sh -c "mockgen -package=persist -destination=$GOPATH/src/$PACKAGE/src/dbnode/persist/persist_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/persist/types.go"
 //go:generate sh -c "mockgen -package=storage -destination=$GOPATH/src/$PACKAGE/src/dbnode/storage/storage_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/storage/types.go"
-//go:generate sh -c "mockgen -package=series -destination=$GOPATH/src/$PACKAGE/src/dbnode/storage/series/buffer_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/storage/series/buffer.go"
 //go:generate sh -c "mockgen -package=block -destination=$GOPATH/src/$PACKAGE/src/dbnode/storage/block/block_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/storage/block/types.go"
 //go:generate sh -c "mockgen -package=rpc -destination=$GOPATH/src/$PACKAGE/src/dbnode/generated/thrift/rpc/rpc_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/generated/thrift/rpc/tchan-rpc.go"
 //go:generate sh -c "mockgen -package=client -destination=$GOPATH/src/$PACKAGE/src/dbnode/client/client_mock.go -source=$GOPATH/src/$PACKAGE/src/dbnode/client/types.go"

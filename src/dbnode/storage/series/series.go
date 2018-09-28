@@ -340,8 +340,8 @@ func (s *dbSeries) Write(
 	s.Lock()
 	defer s.Unlock()
 
-	if !s.opts.RetentionOptions().NonRealtimeWritesEnabled() && !s.isRealtime(timestamp) {
-		return m3dberrors.ErrNonRealtimeWriteTimeNotEnabled
+	if !s.opts.RetentionOptions().OutOfOrderWritesEnabled() && !s.isRealtime(timestamp) {
+		return m3dberrors.ErrOutOfOrderWriteTimeNotEnabled
 	}
 
 	blockSize := s.opts.RetentionOptions().BlockSize()
@@ -773,7 +773,7 @@ func (s *dbSeries) Reset(
 	s.id = id
 	s.tags = tags
 
-	if s.opts.RetentionOptions().NonRealtimeWritesEnabled() {
+	if s.opts.RetentionOptions().OutOfOrderWritesEnabled() {
 		bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
 		s.bucketPool = newdbBucketPool(bucketPoolOpts)
 	}
