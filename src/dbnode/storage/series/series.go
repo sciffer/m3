@@ -79,9 +79,9 @@ type dbSeries struct {
 	blockOnEvictedFromWiredList block.OnEvictedFromWiredList
 	pool                        DatabaseSeriesPool
 
-	bucketLRUCache [lruCacheSize]*dbBufferBucket
-	buckets        map[xtime.UnixNano]*dbBufferBucket
-	bucketPool     *dbBufferBucketPool
+	bucketLRUCache [lruCacheSize]*dbBucket
+	buckets        map[xtime.UnixNano]*dbBucket
+	bucketPool     *dbBucketPool
 	bufferPast     time.Duration
 	bufferFuture   time.Duration
 }
@@ -133,7 +133,6 @@ func (s *dbSeries) Tick() (TickResult, error) {
 	s.Lock()
 	defer s.Unlock()
 
-	now := s.now()
 	for _, bucket := range s.buckets {
 		// Try to merge any out of order encoders to amortize the cost of a drain
 		mergeResult, err := bucket.merge()
@@ -178,10 +177,11 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 		expireCutoff = now.Add(-ropts.RetentionPeriod()).Truncate(ropts.BlockSize())
 		wiredTimeout = ropts.BlockDataExpiryAfterNotAccessedPeriod()
 	)
-	for startNano, currBlock := range s.blocks.AllBlocks() {
+	for startNano, bucket := range s.buckets {
 		start := startNano.ToTime()
+		cachedBlock := bucket.cached
 		if start.Before(expireCutoff) {
-			s.blocks.RemoveBlockAt(start)
+			s.removeBucketAt(start)
 			// If we're using the LRU policy and the block was retrieved from disk,
 			// then don't close the block because that is the WiredList's
 			// responsibility. The block will hang around the WiredList until
@@ -203,12 +203,18 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 			// 		4) WiredList tries to close the block, not knowing that it has
 			// 		   already been closed, and re-opened / re-used leading to
 			// 		   unexpected behavior or data loss.
-			if cachePolicy == CacheLRU && currBlock.WasRetrievedFromDisk() {
-				// Do nothing
-			} else {
-				currBlock.Close()
+			if cachedBlock != nil {
+				if cachePolicy == CacheLRU && cachedBlock.WasRetrievedFromDisk() {
+					// Do nothing
+				} else {
+					cachedBlock.Close()
+				}
+				result.madeExpiredBlocks++
 			}
-			result.madeExpiredBlocks++
+			continue
+		}
+
+		if cachedBlock == nil {
 			continue
 		}
 
@@ -220,7 +226,7 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 			continue
 		}
 
-		if cachePolicy == CacheAllMetadata && !currBlock.IsRetrieved() {
+		if cachePolicy == CacheAllMetadata && !cachedBlock.IsRetrieved() {
 			// Already unwired
 			result.UnwiredBlocks++
 			continue
@@ -239,13 +245,13 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 				// Apply RecentlyRead logic (CacheAllMetadata is being removed soon)
 				fallthrough
 			case CacheRecentlyRead:
-				sinceLastRead := now.Sub(currBlock.LastReadTime())
+				sinceLastRead := now.Sub(cachedBlock.LastReadTime())
 				shouldUnwire = sinceLastRead >= wiredTimeout
 			case CacheLRU:
 				// The tick is responsible for managing the lifecycle of blocks that were not
 				// read from disk (not retrieved), and the WiredList will manage those that were
 				// retrieved from disk.
-				shouldUnwire = !currBlock.WasRetrievedFromDisk()
+				shouldUnwire = !cachedBlock.WasRetrievedFromDisk()
 			default:
 				s.opts.InstrumentOptions().Logger().Fatalf(
 					"unhandled cache policy in series tick: %s", cachePolicy)
@@ -260,20 +266,20 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 				// NB(r): Each block needs shared ref to the series ID
 				// or else each block needs to have a copy of the ID
 				id := s.id
-				checksum, err := currBlock.Checksum()
+				checksum, err := cachedBlock.Checksum()
 				if err != nil {
 					return result, err
 				}
 				metadata := block.RetrievableBlockMetadata{
 					ID:       id,
-					Length:   currBlock.Len(),
+					Length:   cachedBlock.Len(),
 					Checksum: checksum,
 				}
-				currBlock.ResetRetrievable(start, currBlock.BlockSize(), retriever, metadata)
+				cachedBlock.ResetRetrievable(start, cachedBlock.BlockSize(), retriever, metadata)
 			default:
 				// Remove the block and it will be looked up later
-				s.blocks.RemoveBlockAt(start)
-				currBlock.Close()
+				bucket.removeCached()
+				cachedBlock.Close()
 			}
 
 			unwired = true
@@ -284,7 +290,7 @@ func (s *dbSeries) updateBlocksWithLock() (updateBlocksResult, error) {
 			result.UnwiredBlocks++
 		} else {
 			result.WiredBlocks++
-			if currBlock.HasMergeTarget() {
+			if cachedBlock.HasMergeTarget() {
 				result.PendingMergeBlocks++
 			}
 		}
@@ -393,7 +399,7 @@ func (s *dbSeries) FetchBlocks(
 	starts []time.Time,
 ) ([]block.FetchBlockResult, error) {
 	s.RLock()
-	var buckets map[xtime.UnixNano]*dbBufferBucket
+	var buckets map[xtime.UnixNano]*dbBucket
 	if s.IsEmpty() {
 		buckets = s.buckets
 	}
@@ -434,8 +440,7 @@ func (s *dbSeries) FetchBlocksMetadata(
 			if size == 0 {
 				continue
 			}
-			//HERE
-			if !opts.IncludeCachedBlocks && b.IsCachedBlock() {
+			if !opts.IncludeCachedBlocks && bucket.hasJustCachedBlock() {
 				// Do not include cached blocks if not specified to, this is
 				// to avoid high amounts of duplication if a significant number of
 				// blocks are cached in memory when returning blocks metadata
@@ -477,7 +482,7 @@ func (s *dbSeries) FetchBlocksMetadata(
 
 func (s *dbSeries) addBlockWithLock(b block.DatabaseBlock) {
 	b.SetOnEvictedFromWiredList(s.blockOnEvictedFromWiredList)
-	s.blocks.AddBlock(b)
+	s.putCachedBlock(b)
 }
 
 // NB(xichen): we are holding a big lock here to drain the in-memory buffer.
@@ -499,11 +504,6 @@ func (s *dbSeries) Bootstrap(bootstrappedBlocks block.DatabaseSeriesBlocks) (Boo
 
 	if bootstrappedBlocks == nil {
 		return result, nil
-	}
-
-	min, _, err := s.MinMax()
-	if err != nil {
-		return result, err
 	}
 
 	var (
@@ -615,8 +615,8 @@ func (s *dbSeries) OnEvictedFromWiredList(id ident.ID, blockStart time.Time) {
 		return
 	}
 
-	block, ok := s.blocks.BlockAt(blockStart)
-	if ok {
+	bucket, ok := s.bucketAt(blockStart)
+	if block := bucket.cached; ok && block != nil {
 		if !block.WasRetrievedFromDisk() {
 			// Should never happen - invalid application state could cause data loss
 			instrument.EmitInvariantViolationAndGetLogger(
@@ -627,7 +627,7 @@ func (s *dbSeries) OnEvictedFromWiredList(id ident.ID, blockStart time.Time) {
 			return
 		}
 
-		s.blocks.RemoveBlockAt(blockStart)
+		bucket.removeCached()
 	}
 }
 
@@ -730,13 +730,13 @@ func (s *dbSeries) Close() {
 		// by the WiredList and should not be closed here. They will eventually
 		// be evicted and closed by  the WiredList when it needs to make room
 		// for new blocks.
-		for _, block := range s.blocks.AllBlocks() {
-			if !block.WasRetrievedFromDisk() {
+		for _, bucket := range s.buckets {
+			if block := bucket.cached; block != nil && !block.WasRetrievedFromDisk() {
 				block.Close()
 			}
 		}
 	default:
-		s.removeAllBuckets()
+		s.removeAllCached()
 	}
 
 	if s.pool != nil {
@@ -775,10 +775,12 @@ func (s *dbSeries) Reset(
 
 	if s.opts.RetentionOptions().NonRealtimeWritesEnabled() {
 		bucketPoolOpts := pool.NewObjectPoolOptions().SetSize(defaultBufferBucketPoolSize)
-		s.bucketPool = newDBBufferBucketPool(bucketPoolOpts)
+		s.bucketPool = newdbBucketPool(bucketPoolOpts)
 	}
-	s.blocks.Reset()
 	s.opts = opts
+	s.bufferPast = opts.RetentionOptions().BufferPast()
+	s.bufferFuture = opts.RetentionOptions().BufferFuture()
+	s.removeAllBuckets()
 	s.bs = bootstrapNotStarted
 	s.blockRetriever = blockRetriever
 	s.onRetrieveBlock = onRetrieveBlock
@@ -787,7 +789,7 @@ func (s *dbSeries) Reset(
 
 // newBucketAt creates a new bucket for a given time and puts it in the
 // bucket map
-func (s *dbSeries) newBucketAt(t time.Time) *dbBufferBucket {
+func (s *dbSeries) newBucketAt(t time.Time) *dbBucket {
 	bucket := s.bucketPool.Get()
 	bucket.resetTo(t, s.opts)
 	s.buckets[xtime.ToUnixNano(t)] = bucket
@@ -795,7 +797,7 @@ func (s *dbSeries) newBucketAt(t time.Time) *dbBufferBucket {
 	return bucket
 }
 
-func (s *dbSeries) bucketAt(t time.Time) (*dbBufferBucket, bool) {
+func (s *dbSeries) bucketAt(t time.Time) (*dbBucket, bool) {
 	// First check LRU cache
 	for _, bucket := range s.bucketLRUCache {
 		if bucket == nil {
@@ -815,7 +817,7 @@ func (s *dbSeries) bucketAt(t time.Time) (*dbBufferBucket, bool) {
 	return nil, false
 }
 
-func (s *dbSeries) updateBucketLRUCache(bucket *dbBufferBucket) {
+func (s *dbSeries) updateBucketLRUCache(bucket *dbBucket) {
 	s.bucketLRUCache[s.lruBucketIdxInCache()] = bucket
 }
 
@@ -856,14 +858,21 @@ type drainAndResetResult struct {
 	mergedOutOfOrderBlocks int
 }
 
-func (s *dbSeries) removeBucketAt(key xtime.UnixNano) {
+func (s *dbSeries) removeBucketAt(t time.Time) {
+	key := xtime.ToUnixNano(t)
 	s.bucketPool.Put(s.buckets[key])
 	delete(s.buckets, key)
 }
 
 func (s *dbSeries) removeAllBuckets() {
-	for key := range s.buckets {
-		s.removeBucketAt(key)
+	for tNano := range s.buckets {
+		s.removeBucketAt(tNano.ToTime())
+	}
+}
+
+func (s *dbSeries) removeAllCached() {
+	for _, bucket := range s.buckets {
+		bucket.removeCached()
 	}
 }
 
@@ -897,4 +906,13 @@ func (s *dbSeries) MinMax() (time.Time, time.Time, error) {
 		return time.Time{}, time.Time{}, errNoAvailableBuckets
 	}
 	return min, max, nil
+}
+
+func (s *dbSeries) putCachedBlock(block block.DatabaseBlock) {
+	blockStart := block.StartTime()
+	bucket, ok := s.bucketAt(blockStart)
+	if !ok {
+		bucket = s.newBucketAt(blockStart)
+	}
+	bucket.cached = block
 }

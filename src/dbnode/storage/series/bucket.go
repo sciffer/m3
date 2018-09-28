@@ -42,11 +42,13 @@ var (
 
 type databaseBufferDrainFn func(b block.DatabaseBlock)
 
-type dbBufferBucket struct {
+type dbBucket struct {
 	opts                  Options
 	start                 time.Time
-	encoders              []inOrderEncoder
+	realtimeEncoders      []inOrderEncoder
+	outOfOrderEncoders    []inOrderEncoder
 	bootstrapped          []block.DatabaseBlock
+	cached                block.DatabaseBlock
 	lastReadUnixNanos     int64
 	lastWriteUnixNanos    int64
 	lastSnapshotUnixNanos int64
@@ -57,7 +59,7 @@ type inOrderEncoder struct {
 	lastWriteAt time.Time
 }
 
-func (b *dbBufferBucket) resetTo(
+func (b *dbBucket) resetTo(
 	start time.Time,
 	opts Options,
 ) {
@@ -66,31 +68,43 @@ func (b *dbBufferBucket) resetTo(
 
 	b.opts = opts
 	bopts := b.opts.DatabaseBlockOptions()
+	b.start = start
+
 	encoder := bopts.EncoderPool().Get()
 	encoder.Reset(start, bopts.DatabaseBlockAllocSize())
-
-	b.start = start
-	b.encoders = append(b.encoders, inOrderEncoder{
+	b.realtimeEncoders = append(b.realtimeEncoders, inOrderEncoder{
 		encoder: encoder,
 	})
+	encoder = bopts.EncoderPool().Get()
+	encoder.Reset(start, bopts.DatabaseBlockAllocSize())
+	b.outOfOrderEncoders = append(b.outOfOrderEncoders, inOrderEncoder{
+		encoder: encoder,
+	})
+
 	b.bootstrapped = nil
+	b.cached = nil
 	atomic.StoreInt64(&b.lastReadUnixNanos, 0)
 	atomic.StoreInt64(&b.lastWriteUnixNanos, 0)
 	atomic.StoreInt64(&b.lastSnapshotUnixNanos, 0)
 }
 
-func (b *dbBufferBucket) finalize() {
+func (b *dbBucket) finalize() {
 	b.resetEncoders()
 	b.resetBootstrapped()
 }
 
-func (b *dbBufferBucket) empty() bool {
+func (b *dbBucket) empty() bool {
 	for _, block := range b.bootstrapped {
 		if block.Len() > 0 {
 			return false
 		}
 	}
-	for _, elem := range b.encoders {
+	for _, elem := range b.realtimeEncoders {
+		if elem.encoder != nil && elem.encoder.NumEncoded() > 0 {
+			return false
+		}
+	}
+	for _, elem := range b.outOfOrderEncoders {
 		if elem.encoder != nil && elem.encoder.NumEncoded() > 0 {
 			return false
 		}
@@ -98,13 +112,13 @@ func (b *dbBufferBucket) empty() bool {
 	return true
 }
 
-func (b *dbBufferBucket) bootstrap(
+func (b *dbBucket) bootstrap(
 	bl block.DatabaseBlock,
 ) {
 	b.bootstrapped = append(b.bootstrapped, bl)
 }
 
-func (b *dbBufferBucket) write(
+func (b *dbBucket) write(
 	// `now` represents the time the metric came in and not the
 	// time of the metric itself.
 	now time.Time,
@@ -120,10 +134,10 @@ func (b *dbBufferBucket) write(
 
 	// Find the correct encoder to write to
 	idx := -1
-	for i := range b.encoders {
-		lastWriteAt := b.encoders[i].lastWriteAt
+	for i := range b.realtimeEncoders {
+		lastWriteAt := b.realtimeEncoders[i].lastWriteAt
 		if timestamp.Equal(lastWriteAt) {
-			last, err := b.encoders[i].encoder.LastEncoded()
+			last, err := b.realtimeEncoders[i].encoder.LastEncoded()
 			if err != nil {
 				return err
 			}
@@ -165,16 +179,16 @@ func (b *dbBufferBucket) write(
 	encoder := bopts.EncoderPool().Get()
 	encoder.Reset(timestamp.Truncate(blockSize), blockAllocSize)
 
-	b.encoders = append(b.encoders, inOrderEncoder{
+	b.realtimeEncoders = append(b.realtimeEncoders, inOrderEncoder{
 		encoder:     encoder,
 		lastWriteAt: timestamp,
 	})
 
-	idx = len(b.encoders) - 1
+	idx = len(b.realtimeEncoders) - 1
 	err := b.writeToEncoderIndex(idx, datapoint, unit, annotation)
 	if err != nil {
 		encoder.Close()
-		b.encoders = b.encoders[:idx]
+		b.realtimeEncoders = b.realtimeEncoders[:idx]
 		return err
 	}
 
@@ -182,24 +196,29 @@ func (b *dbBufferBucket) write(
 	return nil
 }
 
-func (b *dbBufferBucket) writeToEncoderIndex(
+func (b *dbBucket) writeToEncoderIndex(
 	idx int,
 	datapoint ts.Datapoint,
 	unit xtime.Unit,
 	annotation []byte,
 ) error {
-	err := b.encoders[idx].encoder.Encode(datapoint, unit, annotation)
+	err := b.realtimeEncoders[idx].encoder.Encode(datapoint, unit, annotation)
 	if err != nil {
 		return err
 	}
 
-	b.encoders[idx].lastWriteAt = datapoint.Timestamp
+	b.realtimeEncoders[idx].lastWriteAt = datapoint.Timestamp
 	return nil
 }
 
-func (b *dbBufferBucket) streams(ctx context.Context) []xio.BlockReader {
-	streams := make([]xio.BlockReader, 0, len(b.bootstrapped)+len(b.encoders))
+func (b *dbBucket) streams(ctx context.Context) []xio.BlockReader {
+	streams := make([]xio.BlockReader, 0, len(b.bootstrapped)+len(b.realtimeEncoders))
 
+	if b.cached != nil {
+		if s, err := b.cached.Stream(ctx); err == nil && s.IsNotEmpty() {
+			streams = append(streams, s)
+		}
+	}
 	for i := range b.bootstrapped {
 		if b.bootstrapped[i].Len() == 0 {
 			continue
@@ -209,9 +228,21 @@ func (b *dbBufferBucket) streams(ctx context.Context) []xio.BlockReader {
 			streams = append(streams, s)
 		}
 	}
-	for i := range b.encoders {
+	for i := range b.realtimeEncoders {
 		start := b.start
-		if s := b.encoders[i].encoder.Stream(); s != nil {
+		if s := b.realtimeEncoders[i].encoder.Stream(); s != nil {
+			br := xio.BlockReader{
+				SegmentReader: s,
+				Start:         start,
+				BlockSize:     b.opts.RetentionOptions().BlockSize(),
+			}
+			ctx.RegisterFinalizer(s)
+			streams = append(streams, br)
+		}
+	}
+	for i := range b.outOfOrderEncoders {
+		start := b.start
+		if s := b.outOfOrderEncoders[i].encoder.Stream(); s != nil {
 			br := xio.BlockReader{
 				SegmentReader: s,
 				Start:         start,
@@ -225,18 +256,21 @@ func (b *dbBufferBucket) streams(ctx context.Context) []xio.BlockReader {
 	return streams
 }
 
-func (b *dbBufferBucket) streamsLen() int {
+func (b *dbBucket) streamsLen() int {
 	length := 0
 	for i := range b.bootstrapped {
 		length += b.bootstrapped[i].Len()
 	}
-	for i := range b.encoders {
-		length += b.encoders[i].encoder.Len()
+	for i := range b.realtimeEncoders {
+		length += b.realtimeEncoders[i].encoder.Len()
+	}
+	for i := range b.outOfOrderEncoders {
+		length += b.outOfOrderEncoders[i].encoder.Len()
 	}
 	return length
 }
 
-func (b *dbBufferBucket) mergeStreams(ctx context.Context) (xio.BlockReader, error) {
+func (b *dbBucket) mergeStreams(ctx context.Context) (xio.BlockReader, error) {
 	if b.empty() {
 		return xio.EmptyBlockReader, nil
 	}
@@ -265,42 +299,50 @@ func (b *dbBufferBucket) mergeStreams(ctx context.Context) (xio.BlockReader, err
 	return streams[0], nil
 }
 
-func (b *dbBufferBucket) setLastRead(value time.Time) {
+func (b *dbBucket) setLastRead(value time.Time) {
 	atomic.StoreInt64(&b.lastReadUnixNanos, value.UnixNano())
 }
 
-func (b *dbBufferBucket) setLastWrite(value time.Time) {
+func (b *dbBucket) setLastWrite(value time.Time) {
 	atomic.StoreInt64(&b.lastWriteUnixNanos, value.UnixNano())
 }
 
-func (b *dbBufferBucket) setLastSnapshot(value time.Time) {
+func (b *dbBucket) setLastSnapshot(value time.Time) {
 	atomic.StoreInt64(&b.lastSnapshotUnixNanos, value.UnixNano())
 }
 
-func (b *dbBufferBucket) lastRead() time.Time {
+func (b *dbBucket) lastRead() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&b.lastReadUnixNanos))
 }
 
-func (b *dbBufferBucket) lastWrite() time.Time {
+func (b *dbBucket) lastWrite() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&b.lastWriteUnixNanos))
 }
 
-func (b *dbBufferBucket) lastSnapshot() time.Time {
+func (b *dbBucket) lastSnapshot() time.Time {
 	return time.Unix(0, atomic.LoadInt64(&b.lastSnapshotUnixNanos))
 }
 
-func (b *dbBufferBucket) resetEncoders() {
+func (b *dbBucket) resetEncoders() {
 	var zeroed inOrderEncoder
-	for i := range b.encoders {
+	for i := range b.realtimeEncoders {
 		// Register when this bucket resets we close the encoder
-		encoder := b.encoders[i].encoder
+		encoder := b.realtimeEncoders[i].encoder
 		encoder.Close()
-		b.encoders[i] = zeroed
+		b.realtimeEncoders[i] = zeroed
 	}
-	b.encoders = b.encoders[:0]
+	b.realtimeEncoders = b.realtimeEncoders[:0]
+
+	for i := range b.outOfOrderEncoders {
+		// Register when this bucket resets we close the encoder
+		encoder := b.outOfOrderEncoders[i].encoder
+		encoder.Close()
+		b.outOfOrderEncoders[i] = zeroed
+	}
+	b.outOfOrderEncoders = b.outOfOrderEncoders[:0]
 }
 
-func (b *dbBufferBucket) resetBootstrapped() {
+func (b *dbBucket) resetBootstrapped() {
 	for i := range b.bootstrapped {
 		bl := b.bootstrapped[i]
 		bl.Close()
@@ -308,26 +350,46 @@ func (b *dbBufferBucket) resetBootstrapped() {
 	b.bootstrapped = nil
 }
 
-func (b *dbBufferBucket) needsMerge() bool {
-	return !b.empty() && !(b.hasJustSingleEncoder() || b.hasJustSingleBootstrappedBlock())
+func (b *dbBucket) needsMerge() bool {
+	return !b.empty() && !(b.hasJustSingleBootstrappedBlock() ||
+		b.hasJustSingleRealtimeEncoder() || b.hasJustSingleOutOfOrderEncoder())
 }
 
-func (b *dbBufferBucket) hasJustSingleEncoder() bool {
-	return len(b.encoders) == 1 && len(b.bootstrapped) == 0
+func (b *dbBucket) hasJustSingleRealtimeEncoder() bool {
+	return len(b.realtimeEncoders) == 1 && len(b.bootstrapped) == 0 && b.outOfOrderEncodersEmpty()
 }
 
-func (b *dbBufferBucket) hasJustSingleBootstrappedBlock() bool {
-	encodersEmpty := len(b.encoders) == 0 ||
-		(len(b.encoders) == 1 &&
-			b.encoders[0].encoder.Len() == 0)
-	return encodersEmpty && len(b.bootstrapped) == 1
+func (b *dbBucket) hasJustSingleOutOfOrderEncoder() bool {
+	return len(b.outOfOrderEncoders) == 1 && len(b.bootstrapped) == 0 && b.realtimeEncodersEmpty()
+}
+
+func (b *dbBucket) hasJustSingleBootstrappedBlock() bool {
+	return b.realtimeEncodersEmpty() && b.outOfOrderEncodersEmpty() && len(b.bootstrapped) == 1
+}
+
+func (b *dbBucket) hasJustCachedBlock() bool {
+	return b.realtimeEncodersEmpty() && b.outOfOrderEncodersEmpty() &&
+		len(b.bootstrapped) == 0 && b.cached != nil
+
+}
+
+func (b *dbBucket) realtimeEncodersEmpty() bool {
+	return len(b.realtimeEncoders) == 0 ||
+		(len(b.realtimeEncoders) == 1 &&
+			b.realtimeEncoders[0].encoder.Len() == 0)
+}
+
+func (b *dbBucket) outOfOrderEncodersEmpty() bool {
+	return len(b.outOfOrderEncoders) == 0 ||
+		(len(b.outOfOrderEncoders) == 1 &&
+			b.outOfOrderEncoders[0].encoder.Len() == 0)
 }
 
 type mergeResult struct {
 	merges int
 }
 
-func (b *dbBufferBucket) merge() (mergeResult, error) {
+func (b *dbBucket) merge() (mergeResult, error) {
 	if !b.needsMerge() {
 		// Save unnecessary work
 		return mergeResult{}, nil
@@ -355,8 +417,8 @@ func (b *dbBufferBucket) merge() (mergeResult, error) {
 
 	var (
 		start   = b.start
-		readers = make([]xio.SegmentReader, 0, len(b.encoders)+len(b.bootstrapped))
-		streams = make([]xio.SegmentReader, 0, len(b.encoders))
+		readers = make([]xio.SegmentReader, 0, len(b.realtimeEncoders)+len(b.outOfOrderEncoders)+len(b.bootstrapped))
+		streams = make([]xio.SegmentReader, 0, len(b.realtimeEncoders)+len(b.outOfOrderEncoders))
 		iter    = b.opts.MultiReaderIteratorPool().Get()
 		ctx     = b.opts.ContextPool().Get()
 	)
@@ -381,8 +443,15 @@ func (b *dbBufferBucket) merge() (mergeResult, error) {
 		}
 	}
 
-	for i := range b.encoders {
-		if s := b.encoders[i].encoder.Stream(); s != nil {
+	for i := range b.realtimeEncoders {
+		if s := b.realtimeEncoders[i].encoder.Stream(); s != nil {
+			merges++
+			readers = append(readers, s)
+			streams = append(streams, s)
+		}
+	}
+	for i := range b.outOfOrderEncoders {
+		if s := b.outOfOrderEncoders[i].encoder.Stream(); s != nil {
 			merges++
 			readers = append(readers, s)
 			streams = append(streams, s)
@@ -405,7 +474,7 @@ func (b *dbBufferBucket) merge() (mergeResult, error) {
 	b.resetEncoders()
 	b.resetBootstrapped()
 
-	b.encoders = append(b.encoders, inOrderEncoder{
+	b.realtimeEncoders = append(b.realtimeEncoders, inOrderEncoder{
 		encoder:     encoder,
 		lastWriteAt: lastWriteAt,
 	})
@@ -419,17 +488,17 @@ type discardMergedResult struct {
 }
 
 // TODO use this
-func (b *dbBufferBucket) discardMerged() (discardMergedResult, error) {
-	if b.hasJustSingleEncoder() {
+func (b *dbBucket) discardMerged() (discardMergedResult, error) {
+	if b.hasJustSingleRealtimeEncoder() {
 		// Already merged as a single encoder
-		encoder := b.encoders[0].encoder
+		encoder := b.realtimeEncoders[0].encoder
 		newBlock := b.opts.DatabaseBlockOptions().DatabaseBlockPool().Get()
 		blockSize := b.opts.RetentionOptions().BlockSize()
 		newBlock.Reset(b.start, blockSize, encoder.Discard())
 
 		// The single encoder is already discarded, no need to call resetEncoders
 		// just remove it from the list of encoders
-		b.encoders = b.encoders[:0]
+		b.realtimeEncoders = b.realtimeEncoders[:0]
 		b.resetBootstrapped()
 
 		return discardMergedResult{newBlock, 0}, nil
@@ -454,7 +523,7 @@ func (b *dbBufferBucket) discardMerged() (discardMergedResult, error) {
 		return discardMergedResult{}, err
 	}
 
-	merged := b.encoders[0].encoder
+	merged := b.realtimeEncoders[0].encoder
 
 	newBlock := b.opts.DatabaseBlockOptions().DatabaseBlockPool().Get()
 	blockSize := b.opts.RetentionOptions().BlockSize()
@@ -462,33 +531,33 @@ func (b *dbBufferBucket) discardMerged() (discardMergedResult, error) {
 
 	// The merged encoder is already discarded, no need to call resetEncoders
 	// just remove it from the list of encoders
-	b.encoders = b.encoders[:0]
+	b.realtimeEncoders = b.realtimeEncoders[:0]
 	b.resetBootstrapped()
 
 	return discardMergedResult{newBlock, result.merges}, nil
 }
 
-func (b *dbBufferBucket) isDirty() bool {
-	return b.lastWrite().After(b.lastSnapshot())
+func (b *dbBucket) removeCached() {
+	b.cached = nil
 }
 
-type dbBufferBucketPool struct {
+type dbBucketPool struct {
 	pool pool.ObjectPool
 }
 
-// newDBBufferBucketPool creates a new dbBufferBucketPool
-func newDBBufferBucketPool(opts pool.ObjectPoolOptions) *dbBufferBucketPool {
-	p := &dbBufferBucketPool{pool: pool.NewObjectPool(opts)}
+// newdbBucketPool creates a new dbBucketPool
+func newdbBucketPool(opts pool.ObjectPoolOptions) *dbBucketPool {
+	p := &dbBucketPool{pool: pool.NewObjectPool(opts)}
 	p.pool.Init(func() interface{} {
-		return &dbBufferBucket{}
+		return &dbBucket{}
 	})
 	return p
 }
 
-func (p *dbBufferBucketPool) Get() *dbBufferBucket {
-	return p.pool.Get().(*dbBufferBucket)
+func (p *dbBucketPool) Get() *dbBucket {
+	return p.pool.Get().(*dbBucket)
 }
 
-func (p *dbBufferBucketPool) Put(bucket *dbBufferBucket) {
+func (p *dbBucketPool) Put(bucket *dbBucket) {
 	p.pool.Put(*bucket)
 }

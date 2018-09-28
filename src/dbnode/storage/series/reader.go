@@ -83,7 +83,7 @@ func (r Reader) readersWithBlocksMapAndBuffer(
 	ctx context.Context,
 	start time.Time,
 	end time.Time,
-	buckets map[xtime.UnixNano]*dbBufferBucket,
+	buckets map[xtime.UnixNano]*dbBucket,
 ) ([][]xio.BlockReader, error) {
 	// TODO(r): pool these results arrays
 	var results [][]xio.BlockReader
@@ -181,7 +181,7 @@ func (r Reader) FetchBlocks(
 func (r Reader) fetchBlocksWithBlocksMapAndBuffer(
 	ctx context.Context,
 	starts []time.Time,
-	buckets map[xtime.UnixNano]*dbBufferBucket,
+	buckets map[xtime.UnixNano]*dbBucket,
 ) ([]block.FetchBlockResult, error) {
 	var (
 		// TODO(r): pool these results arrays
