@@ -38,6 +38,10 @@ import (
 type processor struct {
 }
 
+func (p processor) Init(op baseOp, controller *transform.Controller, opts transform.Options) Processor {
+	return &p
+}
+
 func (p *processor) Process(f []float64) float64 {
 	sum := 0.0
 	for _, n := range f {
@@ -47,9 +51,9 @@ func (p *processor) Process(f []float64) float64 {
 	return sum
 }
 
-func dummyProcessor(_ baseOp, _ *transform.Controller, _ transform.Options) Processor {
-	return &processor{}
-}
+// func processor{}(_ baseOp, _ *transform.Controller, _ transform.Options) Processor {
+// 	return &processor{}
+// }
 
 func compareCacheState(t *testing.T, bNode *baseNode, bounds models.Bounds, state []bool, debugMsg string) {
 	actualState := make([]bool, len(state))
@@ -69,7 +73,7 @@ func TestBaseWithB0(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -125,7 +129,7 @@ func TestBaseWithB1B0(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -157,7 +161,7 @@ func TestBaseWithB0B1(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -189,7 +193,7 @@ func TestBaseWithB0B1B2(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -227,7 +231,7 @@ func TestBaseWithB0B2B1(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -265,7 +269,7 @@ func TestBaseWithB1B0B2(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -303,7 +307,7 @@ func TestBaseWithB1B2B0(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -341,7 +345,7 @@ func TestBaseWithB2B0B1(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -379,7 +383,7 @@ func TestBaseWithB2B1B0(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -417,7 +421,7 @@ func TestBaseWithSize3B0B1B2B3B4(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     15 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{
@@ -475,7 +479,7 @@ func TestSingleProcessRequest(t *testing.T) {
 	baseOp := baseOp{
 		operatorType: "dummy",
 		duration:     5 * time.Minute,
-		processorFn:  dummyProcessor,
+		processorFn:  processor{},
 	}
 
 	node := baseOp.Node(c, transform.Options{

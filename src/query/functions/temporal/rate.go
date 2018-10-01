@@ -47,17 +47,12 @@ const (
 	IncreaseType = "increase"
 )
 
-// NewRateOp creates a new base temporal transform for rate functions
-func NewRateOp(args []interface{}, optype string) (transform.Params, error) {
-	if optype == IRateType || optype == IDeltaType || optype == RateType ||
-		optype == IncreaseType || optype == DeltaType {
-		return newBaseOp(args, optype, newRateNode, nil)
-	}
-
-	return nil, fmt.Errorf("unknown rate type: %s", optype)
+type rateProcessor struct {
+	isRate, isCounter bool
+	rateFn            rateFn
 }
 
-func newRateNode(op baseOp, controller *transform.Controller, opts transform.Options) Processor {
+func (r rateProcessor) Init(op baseOp, controller *transform.Controller, opts transform.Options) Processor {
 	var (
 		isRate, isCounter bool
 		rateFn            = standardRateFunc
@@ -84,6 +79,17 @@ func newRateNode(op baseOp, controller *transform.Controller, opts transform.Opt
 		isCounter:  isCounter,
 		rateFn:     rateFn,
 	}
+}
+
+// NewRateOp creates a new base temporal transform for rate functions
+func NewRateOp(args []interface{}, optype string) (transform.Params, error) {
+	if optype == IRateType || optype == IDeltaType || optype == RateType ||
+		optype == IncreaseType || optype == DeltaType {
+		r := rateProcessor{}
+		return newBaseOp(args, optype, r)
+	}
+
+	return nil, fmt.Errorf("unknown rate type: %s", optype)
 }
 
 type rateFn func([]float64, bool, bool, transform.TimeSpec) float64
